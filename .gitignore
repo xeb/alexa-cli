@@ -6,7 +6,6 @@ dist/
 *.egg_info/
 alexa.egg-info/
 static/
-tests/
 pwd/
 artifacts/
 old/
