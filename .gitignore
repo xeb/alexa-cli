@@ -1,0 +1,16 @@
+__pycache__/
+.alexa/
+.eggs/
+build/
+dist/
+*.egg_info/
+alexa.egg-info/
+static/
+tests/
+pwd/
+artifacts/
+old/
+.coverage
+.pytest_cache/
+tokens.db
+config.json
