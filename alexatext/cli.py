@@ -6,14 +6,14 @@ A hacky but small script that acts as an Alexa Voice Service client allowing com
 
 Usage:
 ---
-$ python alexa.py "what time is it"
+$ python cli.py "what time is it"
 its nine fifteen p m
 
-$ python alexa.py -h
+$ python cli.py -h
 
-$ python alexa.py --configure # Setup AVS Client ID, Secret, and Program Name
+$ python cli.py --configure # Setup AVS Client ID, Secret, and Program Name
 
-$ ./alexa.py --token_key="personal" --verbose --artifacts --output="./artifacts/request" "what time is it"
+$ ./cli.py --token_key="personal" --verbose --artifacts --output="./artifacts/request" "what time is it"
 ...
 
 -------------
@@ -686,7 +686,7 @@ def main():
     global VERBOSE_MODE
     global TOKEN_KEY
     TOKEN_KEY = None
-    
+
     parser = argparse.ArgumentParser("alexa")
     parser.add_argument("-c", "--configure", help="Reconfigures your client ID, client secret and programId with AVS. Stored in",
                         required=False, action='store_true')
