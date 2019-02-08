@@ -477,14 +477,17 @@ def transcribe_with_deepspeech(tmp_dir):
     def tmp(path): return os.path.join(tmp_dir, path)
 
     deepspeech_model_path = CONFIG["deepspeechModelPath"]
-    cmds = ["deepspeech", os.path.join(deepspeech_model_path, "output_graph.pb"),
-            os.path.join(tmp_dir, "result.wav"),
-            os.path.join(deepspeech_model_path, "alphabet.txt"),
-            os.path.join(deepspeech_model_path, "lm.binary"),
-            os.path.join(deepspeech_model_path, "trie")]
-
+    cmds = ["deepspeech", 
+            "--model", os.path.join(deepspeech_model_path, "output_graph.pb"),
+            "--audio", os.path.join(tmp_dir, "result.wav"),
+            "--alphabet", os.path.join(deepspeech_model_path, "alphabet.txt"),
+            "--trie", os.path.join(deepspeech_model_path, "trie")
+            ]
+    
+    log("transcribe_with_deepspeech: `%s`" % " ".join(cmds))
     log("transcribe_with_deepspeech: transcribing from %s using model %s" %
         (tmp_dir, deepspeech_model_path))
+        
     p = subprocess.Popen(" ".join(cmds), shell=True,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_dir)
     stdout, stderr = p.communicate()

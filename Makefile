@@ -9,14 +9,22 @@ test: clean
 coverage: clean
 	pytest --cov="alexatext" .
 
+# TODO: copy models into the BUILD so they get distributed
 container:
-	docker build -t xebxeb/alexa-cli -f Dockerfile .
+	-mkdir -p ./.alexa
+	cp -r `python -c 'import json; from os.path import expanduser; CONFIG_PATH=expanduser("~/.alexa/config.json"); print(json.load(open(CONFIG_PATH))["deepspeechModelPath"])'` ./.alexa/
+	docker build -t alexacli/alexacli -f Dockerfile .
 
+publish:
+	docker push alexacli/alexacli 
+
+# Update the config file so the model inside the container is used at runtime
+# TODO: get gcloud working at runtime
 debug: container
 	-mkdir -p ./.alexa
 	cp -f ~/.alexa/config.json ./.alexa/config.json
 	cp -f ~/.alexa/tokens.db ./.alexa/tokens.db
-	-docker run --rm -h "`hostname`" -it -v `pwd`:/root xebxeb/alexa-cli /bin/bash
+	-docker run --rm -h "`hostname`" -it -v `pwd`:/root alexacli/alexacli /bin/bash
 
 clean:
 	-rm -rf .eggs/
