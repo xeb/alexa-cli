@@ -23,11 +23,18 @@ there are 220 days until Christmas Day
 # Getting Started
 
 ## Dependencies
-There are many dependencies you will need. Check to ensure the following commands are working and executable from your shell:
+There are many dependencies you will need. 
+
+For Linux (Debian/Ubuntu) try:
+```
+sudo apt install -y festival sox curl ffmpeg
+```
+
+Check to ensure the following commands are working and executable from your shell:
 
 - `sox`
 - `text2wave` (Festival)
-- `avconv` (libav-tools)
+- `ffmpeg` (ffmpeg)
 - `curl`
 
 ### Notes to Mac Users
@@ -41,6 +48,8 @@ See the section below for specific instructions.
 ### If using Google
 Be sure the following command works:
 - `gcloud`
+
+See: https://cloud.google.com/sdk/docs/downloads-apt-get
 
 ### If using Deepspeech
 Be sure the following command works:

@@ -44,7 +44,7 @@ VERBOSE_MODE = False
 TOKENS_DB = expanduser("~/.alexa/tokens.db")
 TRANSCRIPTIONS_DB = expanduser("~/.alexa/transcriptions.db")
 CONFIG_PATH = expanduser('~/.alexa/config.json')
-REQUIRED_TOOLS = ["text2wave", "sox", "avconv", "curl"]
+REQUIRED_TOOLS = ["text2wave", "sox", "ffmpeg", "curl"]
 Application = Flask(__name__)
 
 
@@ -386,12 +386,12 @@ def post_process_response(tmp_dir):
 
         log("post_process_response: Wrote %s" % tmp("part-%s.mp3" % i))
 
-    # Let's just make a script that can pull all this audio together and convert with avconv
+    # Let's just make a script that can pull all this audio together and convert with ffmpeg
     script = "#!/bin/bash\n \
 f=\"result.mp3\"\n \
 find *.mp3 -type f -size +4096c -exec cat {} \\; > $f \n \
-avconv -i \"$f\" -acodec pcm_s16le -ac 1 -ar 16000 \"${f%.mp3}.wav\" > /dev/null \n \
-avconv -i result.wav -af aformat=s16:16000 result.flac \n \
+ffmpeg -i \"$f\" -acodec pcm_s16le -ac 1 -ar 16000 \"${f%.mp3}.wav\" > /dev/null \n \
+ffmpeg -i result.wav -af aformat=s16:16000 result.flac \n \
         "
     with open(tmp("convert.sh"), 'w') as fw:
         fw.write(script)
@@ -480,8 +480,8 @@ def transcribe_with_deepspeech(tmp_dir):
     cmds = ["deepspeech", 
             "--model", os.path.join(deepspeech_model_path, "output_graph.pb"),
             "--audio", os.path.join(tmp_dir, "result.wav"),
-            "--alphabet", os.path.join(deepspeech_model_path, "alphabet.txt"),
-            "--trie", os.path.join(deepspeech_model_path, "trie")
+            # "--alphabet", os.path.join(deepspeech_model_path, "alphabet.txt"),
+            # "--trie", os.path.join(deepspeech_model_path, "trie")
             ]
     
     log("transcribe_with_deepspeech: `%s`" % " ".join(cmds))
@@ -504,7 +504,7 @@ def transcribe_from_google(tmp_dir):
     """
     def tmp(path): return os.path.join(tmp_dir, path)
     script = "#!/bin/bash\n \
-export GOOGLE_APPLICATION_CREDENTIALS=~/.gcloud/gcloud-alexa-text.json \n \
+export GOOGLE_APPLICATION_CREDENTIALS=~/.gcloud/gcloud-alexa-cli.json \n \
 export ACCESS_TOKEN=`gcloud auth application-default print-access-token` \n \
 echo $ACCESS_TOKEN \n \
     "
@@ -655,13 +655,15 @@ def request_from_alexa(text_input, keep_artifacts=False, loc_artifacts=None, tok
     if loc_artifacts != None:
         output_loc = expanduser(os.path.join(loc_artifacts, str(uuid.uuid4())))
         shutil.copytree(tmp("."), output_loc)
-        log("request_from_alexa: artifacts available in %s", output_loc)
+        log(f"request_from_alexa: artifacts available in {output_loc}", output_loc)
 
     if keep_artifacts == False:
         for file in os.listdir(tmp_dir):
             os.unlink(tmp(file))
 
         os.rmdir(tmp_dir)
+    else:
+        log(f"request_from_alexa: temp artifacts available in {tmp_dir}")
 
     return {'success': result_bool, 'result': result}
 
