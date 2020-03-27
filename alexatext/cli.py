@@ -51,7 +51,7 @@ Application = Flask(__name__)
 def log(msg, *params):
     """ Simple logging function that checks global verbosity """
     global VERBOSE_MODE
-    if VERBOSE_MODE:
+    if VERBOSE_MODE and len(params) > 0:
         print(msg % params)
 
 
@@ -490,11 +490,14 @@ def transcribe_with_deepspeech(tmp_dir):
         
     p = subprocess.Popen(" ".join(cmds), shell=True,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tmp_dir)
+
     stdout, stderr = p.communicate()
 
     text = stdout.decode("utf-8").strip()
-    log("transcribe_with_deepspeech: stderr==%s" % stderr)
-    log("transcribe_with_deepspeech: transcribed \n----\n'%s'\n-----\n" % text)
+    if stderr and stderr != "":
+        print(f"transcribe_with_deepspeech: stderr=={str(stderr)}")
+
+    log(f"transcribe_with_deepspeech: transcribed \n----\n'{text}'\n")
     return text
 
 
