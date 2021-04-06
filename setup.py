@@ -10,7 +10,7 @@ setup(
     version=open(VERSION_PATH, 'r').read(),
     license='MIT',
     install_requires=[
-        'deepspeech',
+#        'deepspeech',
     ],
     entry_points={
         'console_scripts': [

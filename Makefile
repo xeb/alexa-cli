@@ -1,6 +1,7 @@
 .PHONY: time
 
 install: clean
+	python -m pip install -r requirements.txt
 	python setup.py install --force
 
 test: clean
