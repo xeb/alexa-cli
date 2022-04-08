@@ -627,6 +627,8 @@ def request_from_alexa(text_input, keep_artifacts=False, loc_artifacts=None, tok
             "https://access-alexa-na.amazon.com/v1/avs/speechrecognizer/recognize"
             ]
     log("request_from_alexa: sending request to Alexa...")
+    log(" ".join(cmds))
+    print(" ".join(cmds))
     out = subprocess.call(cmds)
     log("request_from_alexa: status code from cURL: %s", out)
 

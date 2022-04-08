@@ -13,7 +13,7 @@ coverage: clean
 # TODO: copy models into the BUILD so they get distributed
 container:
 	-mkdir -p ./.alexa
-	cp -r `python -c 'import json; from os.path import expanduser; CONFIG_PATH=expanduser("~/.alexa/config.json"); print(json.load(open(CONFIG_PATH))["deepspeechModelPath"])'` ./.alexa/
+	-cp -r `python -c 'import json; from os.path import expanduser; CONFIG_PATH=expanduser("~/.alexa/config.json"); print(json.load(open(CONFIG_PATH))["deepspeechModelPath"])'` ./.alexa/
 	docker build -t alexacli/alexacli -f Dockerfile .
 
 publish:
