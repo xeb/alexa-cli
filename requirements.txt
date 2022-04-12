@@ -1,4 +1,9 @@
-requests==2.20.0
-Flask==2.0.3
-pytest==3.5.0
-pytest-cov==2.5.1
+fire
+flask
+requests
+SpeechRecognition
+pocketsphinx
+absl-py
+pytest
+alexa_client
+ffmpeg-python

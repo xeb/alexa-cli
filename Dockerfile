@@ -1,15 +1,6 @@
-FROM python:3.6.5-jessie
-RUN apt-get update -y
-RUN apt-get update -y && apt-get install -y libav-tools python-pip festival sox curl
-RUN pip install requests Flask pytest deepspeech
-RUN mkdir -p /usr/local/alexa/alexatext
-WORKDIR /usr/local/alexa
-ADD *.py /usr/local/alexa/
-ADD alexatext/* /usr/local/alexa/alexatext/
-ADD tests /usr/local/alexa/
-ADD requirements.txt /usr/local/alexa/
-ADD VERSION /usr/local/alexa/
-ADD Makefile /usr/local/alexa/
-RUN make install
-
-CMD [  ]
+FROM python:3.8
+RUN apt-get update -y && apt-get install -y swig build-essential libasound2-dev libpulse-dev festival ffmpeg
+RUN mkdir -p /alexa-cli
+COPY VERSION requirements.txt Makefile setup.py setup.cfg /alexa-cli/
+COPY alexa_cli /alexa-cli/alexa_cli
+RUN cd /alexa-cli/ && make
