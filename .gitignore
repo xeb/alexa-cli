@@ -12,4 +12,5 @@ old/
 .coverage
 .pytest_cache/
 tokens.db
+tokens.json
 config.json
