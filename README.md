@@ -90,7 +90,7 @@ Now that you have a `Client ID`, `Secret`, and `Program ID` create a JSON file e
 
 mkdir -p ~/.alexa
 
-echo "{\"client_id\":\"{YOUR_CLIENT_ID}\",\"secret\":\"{SECRET}\",\"program\":\"{PROGRAM}\"}" > ~/.alexa/config.jaon
+echo "{\"client_id\":\"{YOUR_CLIENT_ID}\",\"secret\":\"{SECRET}\",\"program\":\"{PROGRAM}\"}" > ~/.alexa/config.json
 
 ```
 
