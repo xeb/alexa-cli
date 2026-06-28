@@ -105,9 +105,22 @@ pub fn tld_for(region: Region) -> &'static str {
 pub struct Device {
     pub serial_number: String,
     pub device_type: String,
+    pub device_family: String,
     pub account_name: String,
     pub customer_id: String,
     pub online: bool,
+}
+
+/// Whether a device can actually receive an announcement: Echo speakers and
+/// Echo Show / Spot screens. Excludes Fire TV, tablets, Auto, Buds(non-speaker),
+/// third-party AVS gear, and the virtual AVS "devices" — including those in an
+/// announcement batch makes Amazon reject the whole request.
+fn is_announceable(d: &Device) -> bool {
+    matches!(
+        d.device_family.to_ascii_uppercase().as_str(),
+        "ECHO" | "KNIGHT" | "ROOK"
+    ) && !d.device_type.is_empty()
+        && !d.serial_number.is_empty()
 }
 
 /// Parse the `devices-v2/device` response. Entries without a serial number
@@ -127,6 +140,11 @@ fn parse_devices(v: &Value) -> Vec<Device> {
                 serial_number: serial,
                 device_type: d
                     .get("deviceType")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                device_family: d
+                    .get("deviceFamily")
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -907,9 +925,92 @@ pub async fn announce(
     let mut state = RemoteState::load();
     state.tld = tld_for(cfg.region).to_string();
     let devices = get_devices(&mut state, verbose).await?;
-    let targets = resolve_devices(&devices, name, all)?;
-    let sequence = build_announcement_sequence_json(message, title, &targets);
-    post_behavior(&mut state, &sequence, verbose).await
+
+    // Choose targets. A named target matches by substring; otherwise (--all, the
+    // default) we select only online, announcement-capable Echo speakers — never
+    // the tablets / Fire TVs / Buds / third-party / virtual devices in the account.
+    let targets: Vec<Device> = if all || name.is_none() {
+        let capable: Vec<Device> = devices
+            .iter()
+            .filter(|d| d.online && is_announceable(d))
+            .cloned()
+            .collect();
+        if capable.is_empty() {
+            bail!("no online, announcement-capable Echo devices found — run `alexa devices`");
+        }
+        capable
+    } else {
+        resolve_devices(&devices, name, false)?
+    };
+
+    // An announcement call carries a single customerId, so group by owner. Batch
+    // each group; if Amazon rejects a batch, fall back to per-device so one
+    // incompatible device can't sink the rest.
+    let mut groups: std::collections::BTreeMap<String, Vec<Device>> =
+        std::collections::BTreeMap::new();
+    for d in targets {
+        groups.entry(d.customer_id.clone()).or_default().push(d);
+    }
+
+    let mut sent = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (_customer, group) in groups {
+        let (s, f) = announce_resilient(&mut state, message, title, &group, verbose).await;
+        sent += s;
+        failed.extend(f);
+    }
+
+    if sent == 0 {
+        bail!(
+            "announcement rejected for all {} target device(s) — try `--device <name>` for one Echo, or `-v` for details",
+            failed.len()
+        );
+    }
+    println!("Announced on {sent} device(s).");
+    if !failed.is_empty() {
+        eprintln!(
+            "Skipped {} device(s) that rejected the announcement: {}",
+            failed.len(),
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Announce to a set of same-customer devices: try one batch call, and if Amazon
+/// rejects it, retry each device individually (skipping failures). Returns
+/// (devices_announced, names_skipped).
+async fn announce_resilient(
+    state: &mut RemoteState,
+    message: &str,
+    title: &str,
+    devices: &[Device],
+    verbose: bool,
+) -> (usize, Vec<String>) {
+    let batch = build_announcement_sequence_json(message, title, devices);
+    if post_behavior(state, &batch, verbose).await.is_ok() {
+        return (devices.len(), Vec::new());
+    }
+    if verbose {
+        eprintln!("[remote] batch rejected; retrying per device");
+    }
+    let mut sent = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for d in devices {
+        let seq = build_announcement_sequence_json(message, title, std::slice::from_ref(d));
+        match post_behavior(state, &seq, verbose).await {
+            Ok(()) => sent += 1,
+            Err(e) => {
+                if verbose {
+                    eprintln!("[remote] {} rejected: {e}", d.account_name);
+                }
+                failed.push(d.account_name.clone());
+            }
+        }
+        // Gentle pacing so a fan-out of per-device calls isn't rate-limited.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    (sent, failed)
 }
 
 /// Speak (TTS) a message on a single device, selected by name.
@@ -950,13 +1051,36 @@ mod tests {
     use super::*;
 
     fn dev(name: &str, serial: &str, dtype: &str, cust: &str, online: bool) -> Device {
+        dev_fam(name, serial, dtype, cust, online, "ECHO")
+    }
+
+    fn dev_fam(
+        name: &str,
+        serial: &str,
+        dtype: &str,
+        cust: &str,
+        online: bool,
+        family: &str,
+    ) -> Device {
         Device {
             serial_number: serial.into(),
             device_type: dtype.into(),
+            device_family: family.into(),
             account_name: name.into(),
             customer_id: cust.into(),
             online,
         }
+    }
+
+    #[test]
+    fn is_announceable_only_echo_speakers() {
+        assert!(is_announceable(&dev_fam("Kitchen", "S", "T", "C", true, "ECHO")));
+        assert!(is_announceable(&dev_fam("Show", "S", "T", "C", true, "KNIGHT")));
+        assert!(!is_announceable(&dev_fam("Tablet", "S", "T", "C", true, "TABLET")));
+        assert!(!is_announceable(&dev_fam("FireTV", "S", "T", "C", true, "FIRE_TV")));
+        assert!(!is_announceable(&dev_fam("CLI", "S", "T", "C", true, "UNKNOWN")));
+        // Echo family but missing type/serial is not targetable.
+        assert!(!is_announceable(&dev_fam("Bad", "", "", "C", true, "ECHO")));
     }
 
     #[test]
