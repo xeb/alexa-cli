@@ -95,6 +95,10 @@ pub fn ensure_model(model: &str) -> Result<PathBuf> {
 }
 
 pub fn transcribe_samples(samples_16k_mono: &[f32], model_path: &Path) -> Result<String> {
+    // Silence whisper.cpp / GGML's chatty stderr (the "whisper_model_load: ..." lines).
+    // We build whisper-rs without log_backend/tracing_backend, so this routes those
+    // messages nowhere. Idempotent; only the first call takes effect.
+    whisper_rs::install_logging_hooks();
     let ctx = WhisperContext::new_with_params(
         model_path.to_str().context("model path not utf8")?,
         WhisperContextParameters::default(),
