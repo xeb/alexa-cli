@@ -93,31 +93,82 @@ async fn exchange(_config: &Config, params: &[(&str, &str)]) -> Result<Tokens> {
     })
 }
 
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 3 <= bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                Ok(b) => {
+                    out.push(b);
+                    i += 3;
+                }
+                Err(_) => {
+                    out.push(b'%');
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub async fn login(config: &Config, port: u16) -> Result<()> {
     let redirect_uri = format!("http://localhost:{port}/auth");
     let url = authorize_url(config, &redirect_uri);
     println!("Opening browser to authorize. If it doesn't open, visit:\n{url}");
     let _ = webbrowser::open(&url);
 
-    // Blocking loopback server; recover the code.
-    let server = tiny_http::Server::http(format!("0.0.0.0:{port}"))
-        .map_err(|e| anyhow::anyhow!("failed to bind localhost:{port}: {e}"))?;
+    // Loopback server bound to localhost only; recover the auth code or surface an error.
+    let server = tiny_http::Server::http(format!("127.0.0.1:{port}"))
+        .map_err(|e| anyhow::anyhow!("failed to bind 127.0.0.1:{port}: {e}"))?;
     let code = loop {
         let request = server.recv()?;
-        let urlpath = request.url().to_string();
-        if let Some(code) = urlpath
-            .split_once("code=")
-            .map(|(_, rest)| rest.split('&').next().unwrap_or("").to_string())
-        {
-            if !code.is_empty() {
-                let _ = request.respond(tiny_http::Response::from_string(
-                    "Authorized. You can close this tab.",
-                ));
-                break code;
+        let url = request.url().to_string();
+        let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+        let mut found_code: Option<String> = None;
+        let mut error: Option<String> = None;
+        for pair in query.split('&') {
+            let (k, val) = pair.split_once('=').unwrap_or((pair, ""));
+            match k {
+                "code" => found_code = Some(percent_decode(val)),
+                "error_description" => error = Some(percent_decode(val)),
+                "error" => {
+                    if error.is_none() {
+                        error = Some(percent_decode(val));
+                    }
+                }
+                _ => {}
             }
         }
+
+        if let Some(c) = found_code.filter(|c| !c.is_empty()) {
+            let _ = request.respond(tiny_http::Response::from_string(
+                "Authorized. You can close this tab.",
+            ));
+            break c;
+        }
+        if let Some(err) = error {
+            let _ = request.respond(tiny_http::Response::from_string(format!(
+                "Authorization failed: {err}. You can close this tab."
+            )));
+            anyhow::bail!(
+                "authorization failed: {err} (check the LWA security profile's Allowed Return URL is http://localhost:{port}/auth)"
+            );
+        }
+        // Some other request (e.g. /favicon.ico) — keep waiting for the real callback.
         let _ = request.respond(tiny_http::Response::from_string(
-            "Waiting for authorization code...",
+            "Waiting for authorization...",
         ));
     };
 

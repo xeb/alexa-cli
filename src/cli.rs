@@ -1,6 +1,6 @@
 use crate::config::{Config, Region, Voice};
 use crate::{auth, avs, cache, tts};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
 
@@ -121,8 +121,16 @@ async fn ask(cli: &Cli, text: &str) -> Result<String> {
     if v {
         eprintln!("[tts] synthesizing with {:?}", cfg.voice);
     }
-    let backend = tts::backend_for(&cfg.voice)?;
-    let pcm_i16 = backend.synth(text)?;
+    // TTS may download a model and runs heavy synthesis; keep it off the async runtime
+    // (reqwest::blocking + CPU work would otherwise panic/stall the Tokio worker).
+    let voice = cfg.voice;
+    let text_owned = text.to_string();
+    let pcm_i16 = tokio::task::spawn_blocking(move || -> Result<Vec<i16>> {
+        let backend = tts::backend_for(&voice)?;
+        backend.synth(&text_owned)
+    })
+    .await
+    .context("tts task panicked")??;
     let pcm_bytes = crate::audio::i16_to_le_bytes(&pcm_i16);
 
     if v {
@@ -169,7 +177,13 @@ async fn ask(cli: &Cli, text: &str) -> Result<String> {
     if v {
         eprintln!("[stt] transcribing with whisper {}", cfg.model);
     }
-    let transcript = crate::stt::transcribe_mp3(&mp3, &cfg)?;
+    // Whisper (and a possible model download) is blocking CPU work — run it off-runtime.
+    let mp3_for_stt = mp3.clone();
+    let cfg_for_stt = cfg.clone();
+    let transcript =
+        tokio::task::spawn_blocking(move || crate::stt::transcribe_mp3(&mp3_for_stt, &cfg_for_stt))
+            .await
+            .context("stt task panicked")??;
 
     if !cli.no_cache && cfg.save_transcription {
         let mut c = cache::Cache::load();

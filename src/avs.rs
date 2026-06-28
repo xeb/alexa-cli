@@ -98,10 +98,9 @@ async fn post_event(
     token: &str,
     event_json: &str,
 ) -> Result<u16> {
-    // SynchronizeState has no audio; reuse the multipart builder with empty audio.
-    // AVS accepts a metadata-only multipart.
+    // SynchronizeState has no audio: send a metadata-only multipart (no audio part).
     let boundary = format!("ev-{}", Uuid::new_v4());
-    let body = build_recognize_multipart(event_json, &[], &boundary);
+    let body = build_event_multipart(event_json, &boundary);
     let (status, _ct, _body) = post_multipart(send_req, host, token, &boundary, body).await?;
     Ok(status)
 }
@@ -214,6 +213,28 @@ pub fn build_recognize_multipart(event_json: &str, pcm: &[u8], boundary: &str) -
     out
 }
 
+/// Build a multipart body for an audio-less event (e.g. `System.SynchronizeState`):
+/// a single JSON `metadata` part and NO audio part. AVS rejects a spurious empty
+/// `audio` octet-stream part on events that carry no audio.
+pub fn build_event_multipart(event_json: &str, boundary: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let push = |out: &mut Vec<u8>, s: &str| out.extend_from_slice(s.as_bytes());
+
+    push(&mut out, &format!("--{boundary}\r\n"));
+    push(
+        &mut out,
+        "Content-Disposition: form-data; name=\"metadata\"\r\n",
+    );
+    push(
+        &mut out,
+        "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+    );
+    push(&mut out, event_json);
+    push(&mut out, "\r\n");
+    push(&mut out, &format!("--{boundary}--\r\n"));
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct Part {
     pub headers: Vec<(String, String)>,
@@ -287,7 +308,7 @@ pub fn parse_multipart_related(content_type: &str, body: &[u8]) -> Result<Vec<Pa
             .ok_or_else(|| anyhow::anyhow!("malformed part: no closing boundary"))?;
         // Content runs up to the CRLF that precedes the boundary.
         let mut content_end = next_boundary;
-        if body[..content_end].ends_with(b"\r\n") {
+        if content_end >= content_start + 2 && &body[content_end - 2..content_end] == b"\r\n" {
             content_end -= 2;
         }
         parts.push(Part {
@@ -382,6 +403,19 @@ mod tests {
         assert!(text.ends_with("--BOUNDARY--\r\n"));
         // raw audio bytes present verbatim:
         assert!(body.windows(4).any(|w| w == [0xDE, 0xAD, 0xBE, 0xEF]));
+    }
+
+    #[test]
+    fn event_multipart_has_metadata_but_no_audio_part() {
+        let body = build_event_multipart("{\"event\":true}", "BOUNDARY");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("--BOUNDARY\r\n"));
+        assert!(text.contains("Content-Disposition: form-data; name=\"metadata\""));
+        assert!(text.contains("Content-Type: application/json"));
+        // audio-less events must NOT carry an audio part:
+        assert!(!text.contains("name=\"audio\""));
+        assert!(!text.contains("application/octet-stream"));
+        assert!(text.ends_with("--BOUNDARY--\r\n"));
     }
 }
 

@@ -36,7 +36,17 @@ pub fn decode_mp3_to_16k_mono(mp3: &[u8]) -> Result<Vec<f32>> {
     let mut channels = 1usize;
     let mut rate = 0u32;
 
-    while let Ok(packet) = format.next_packet() {
+    loop {
+        let packet = match format.next_packet() {
+            Ok(p) => p,
+            Err(symphonia::core::errors::Error::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(symphonia::core::errors::Error::ResetRequired) => break,
+            Err(e) => return Err(e.into()),
+        };
         if packet.track_id() != track_id {
             continue;
         }
