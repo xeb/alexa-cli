@@ -582,7 +582,14 @@ pub fn build_signin_url(tld: &str, device_id: &str, code_challenge: &str, locale
             "http://specs.openid.net/auth/2.0/identifier_select".to_string(),
         ),
         ("openid.mode", "checkid_setup".to_string()),
-        ("openid.ns.oa2", format!("{base}/ap/ext/oauth/2")),
+        // OpenID namespace identifier — an EXACT-match string, NOT a real endpoint.
+        // Amazon's is the literal `http://...` (http, fixed www.amazon.com host). Using
+        // https or a tld-templated host makes Amazon ignore the oauth2 extension and
+        // return a plain id_res with no authorization_code.
+        (
+            "openid.ns.oa2",
+            "http://www.amazon.com/ap/ext/oauth/2".to_string(),
+        ),
         ("openid.oa2.client_id", format!("device:{device_id}")),
         (
             "openid.ns.pape",
@@ -1121,6 +1128,10 @@ mod tests {
         assert!(url.contains("openid.oa2.client_id=device%3Adeadbeef"));
         assert!(url.contains("openid.assoc_handle=amzn_dp_project_dee_ios"));
         assert!(url.contains("language=en_US"));
+        // Regression: the oauth2 namespace must be the exact http identifier, never
+        // https (else Amazon drops the oa2 extension and returns no authorization_code).
+        assert!(url.contains("openid.ns.oa2=http%3A%2F%2Fwww.amazon.com%2Fap%2Fext%2Foauth%2F2"));
+        assert!(!url.contains("openid.ns.oa2=https"));
     }
 
     #[test]
