@@ -82,6 +82,8 @@ pub enum Command {
         #[arg(long)]
         device: String,
     },
+    /// Browser-based login to enable announcements (mints a durable refresh token)
+    AnnounceLogin,
     /// Store Alexa Remote auth (refresh token and/or cookie string)
     AnnounceAuth {
         /// LWA refresh token (Atzr|...)
@@ -160,6 +162,11 @@ pub async fn run() -> Result<()> {
             remote::say(&cfg, message, device, cli.verbose).await?;
             println!("Sent.");
             return Ok(());
+        }
+        Some(Command::AnnounceLogin) => {
+            let mut cfg = Config::load_or_default();
+            apply_overrides(&cli, &mut cfg);
+            return remote::login(&cfg, cli.verbose).await;
         }
         Some(Command::AnnounceAuth {
             refresh_token,

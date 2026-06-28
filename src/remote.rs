@@ -10,10 +10,14 @@
 use crate::auth::Tokens;
 use crate::config::{Config, Region};
 use anyhow::{anyhow, bail, Context, Result};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::Engine;
+use rand::RngCore;
 use reqwest::cookie::{CookieStore, Jar};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -521,6 +525,293 @@ async fn get_devices(state: &mut RemoteState, verbose: bool) -> Result<Vec<Devic
 }
 
 // ---------------------------------------------------------------------------
+// Browser-based device registration (durable refresh token)
+// ---------------------------------------------------------------------------
+//
+// One-time OAuth "device registration" against Login-with-Amazon, mirroring the
+// flow used by the `audible` Python library and Apollon77/alexa-cookie. The user
+// signs in in their real browser (MFA/CAPTCHA/passkey safe), lands on the fixed
+// /ap/maplanding redirect, and pastes the final URL back. The authorization code
+// from that URL is exchanged at /auth/register (with a PKCE code_verifier) for a
+// durable `Atnr|...` refresh token that drives the behaviors API.
+
+/// The Alexa app device type registered against (iOS "Project Dee").
+const REG_DEVICE_TYPE: &str = "A2IVLV5VM2W81";
+/// App version reported during registration (matches APP_USER_AGENT).
+const REG_APP_VERSION: &str = "2.2.651540.0";
+
+/// PKCE code challenge for a verifier: base64url-no-pad(SHA256(verifier bytes)).
+pub fn pkce_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+/// Build the OAuth `client_id` device id: lowercase hex of the ASCII bytes of
+/// `"<serial>#A2IVLV5VM2W81"`, so it decodes back to `device:<serial>#<type>`.
+pub fn device_id_for(serial: &str) -> String {
+    hex::encode(format!("{serial}#{REG_DEVICE_TYPE}").as_bytes())
+}
+
+/// `openid.assoc_handle`/`pageId` suffix for non-`.com` marketplaces.
+fn assoc_handle_suffix(tld: &str) -> &'static str {
+    match tld {
+        "co.uk" => "_uk",
+        "co.jp" => "_jp",
+        "de" => "_de",
+        _ => "", // ".com" (tested NA path) and unknowns
+    }
+}
+
+/// Build the Amazon `/ap/signin` device-registration OAuth URL (PKCE, S256).
+/// All query *values* are percent-encoded; keys are left as-is.
+pub fn build_signin_url(tld: &str, device_id: &str, code_challenge: &str, locale: &str) -> String {
+    let base = format!("https://www.amazon.{tld}");
+    let handle = format!("amzn_dp_project_dee_ios{}", assoc_handle_suffix(tld));
+    let params: Vec<(&str, String)> = vec![
+        ("openid.return_to", format!("{base}/ap/maplanding")),
+        ("openid.assoc_handle", handle.clone()),
+        (
+            "openid.identity",
+            "http://specs.openid.net/auth/2.0/identifier_select".to_string(),
+        ),
+        ("pageId", handle),
+        ("accountStatusPolicy", "P1".to_string()),
+        (
+            "openid.claimed_id",
+            "http://specs.openid.net/auth/2.0/identifier_select".to_string(),
+        ),
+        ("openid.mode", "checkid_setup".to_string()),
+        ("openid.ns.oa2", format!("{base}/ap/ext/oauth/2")),
+        ("openid.oa2.client_id", format!("device:{device_id}")),
+        (
+            "openid.ns.pape",
+            "http://specs.openid.net/extensions/pape/1.0".to_string(),
+        ),
+        ("openid.oa2.response_type", "code".to_string()),
+        ("openid.ns", "http://specs.openid.net/auth/2.0".to_string()),
+        ("openid.pape.max_auth_age", "0".to_string()),
+        ("openid.oa2.scope", "device_auth_access".to_string()),
+        ("openid.oa2.code_challenge_method", "S256".to_string()),
+        ("openid.oa2.code_challenge", code_challenge.to_string()),
+        ("language", locale.to_string()),
+    ];
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}/ap/signin?{query}")
+}
+
+/// Extract `openid.oa2.authorization_code` from a pasted maplanding URL (or bare
+/// query string), percent-decoded. Returns None if the parameter is absent.
+pub fn extract_auth_code(pasted_url: &str) -> Option<String> {
+    let query = pasted_url
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or(pasted_url);
+    let query = query.split('#').next().unwrap_or(query);
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == "openid.oa2.authorization_code" && !v.is_empty() {
+            return Some(
+                urlencoding::decode(v)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| v.to_string()),
+            );
+        }
+    }
+    None
+}
+
+/// Fill `n` bytes from the thread RNG.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    rand::thread_rng().fill_bytes(&mut buf);
+    buf
+}
+
+/// The `map-md` device-descriptor cookie value (standard base64 of a small JSON).
+fn map_md_cookie() -> String {
+    let md = json!({
+        "device_user_dictionary": [],
+        "device_registration_data": { "software_version": "1" },
+        "app_identifier": {
+            "app_version": REG_APP_VERSION,
+            "bundle_id": "com.amazon.echo"
+        }
+    });
+    STANDARD.encode(serde_json::to_vec(&md).unwrap_or_default())
+}
+
+/// POST /auth/register: exchange the OAuth authorization code (+ PKCE verifier)
+/// for a durable refresh token, returning `(refresh_token, website_cookie_header)`.
+#[allow(clippy::too_many_arguments)]
+async fn register(
+    tld: &str,
+    device_id: &str,
+    serial: &str,
+    authorization_code: &str,
+    code_verifier: &str,
+    frc: &str,
+    locale: &str,
+    verbose: bool,
+) -> Result<(String, Option<String>)> {
+    let url = format!("https://api.amazon.{tld}/auth/register");
+    let cookie_header = format!("frc={frc}; map-md={}", map_md_cookie());
+    let body = json!({
+        "requested_extensions": ["device_info", "customer_info"],
+        "cookies": { "website_cookies": [], "domain": format!(".amazon.{tld}") },
+        "registration_data": {
+            "domain": "Device",
+            "app_version": REG_APP_VERSION,
+            "device_type": REG_DEVICE_TYPE,
+            "device_name": "alexa-cli",
+            "os_version": "18.3.1",
+            "device_serial": serial,
+            "device_model": "iPhone",
+            "app_name": "alexa-cli",
+            "software_version": "1"
+        },
+        "auth_data": {
+            "client_id": device_id,
+            "authorization_code": authorization_code,
+            "code_verifier": code_verifier,
+            "code_algorithm": "SHA-256",
+            "client_domain": "DeviceLegacy"
+        },
+        "user_context_map": { "frc": frc },
+        "requested_token_type": ["bearer", "mac_dms", "website_cookies"]
+    });
+    if verbose {
+        eprintln!("[remote] POST {url}");
+    }
+    let client = reqwest::Client::builder().build()?;
+    let resp = client
+        .post(&url)
+        .header("User-Agent", APP_USER_AGENT)
+        .header("x-amzn-identity-auth-domain", format!("api.amazon.{tld}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("Accept-Language", locale)
+        .header("Cookie", cookie_header)
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await
+        .context("posting to auth/register")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if verbose {
+        eprintln!("[remote] register status={status} body={}", snippet(&text));
+    }
+    let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+        anyhow!(
+            "device registration returned non-JSON (status {status}): {} ({e})",
+            snippet(&text)
+        )
+    })?;
+    let tokens = parsed
+        .get("response")
+        .and_then(|r| r.get("success"))
+        .and_then(|s| s.get("tokens"));
+    let refresh_token = tokens
+        .and_then(|t| t.get("bearer"))
+        .and_then(|b| b.get("refresh_token"))
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "device registration did not return a refresh token (status {status}); \
+                 the authorization code may be stale or the pasted URL incomplete: {}",
+                snippet(&text)
+            )
+        })?
+        .to_string();
+    let cookies = tokens
+        .and_then(|t| t.get("website_cookies"))
+        .and_then(extract_cookies);
+    Ok((refresh_token, cookies))
+}
+
+/// Browser-based login: mint a durable refresh token and cache it in
+/// `~/.alexa/alexa_remote.json` so announcements/say work without manual tokens.
+pub async fn login(cfg: &Config, verbose: bool) -> Result<()> {
+    use std::io::Write;
+
+    let tld = tld_for(cfg.region).to_string();
+    let locale = "en_US";
+
+    let serial = hex::encode_upper(random_bytes(16));
+    let code_verifier = URL_SAFE_NO_PAD.encode(random_bytes(32));
+    let code_challenge = pkce_challenge(&code_verifier);
+    let frc = STANDARD.encode(random_bytes(313));
+    let device_id = device_id_for(&serial);
+    let url = build_signin_url(&tld, &device_id, &code_challenge, locale);
+
+    println!(
+        "Opening your browser to sign in to Amazon. After you log in you will land on a\n\
+         BLANK or 'page not found' page — that is expected. Copy the FULL URL from the\n\
+         address bar and paste it here.\n"
+    );
+    println!("If the browser doesn't open, visit this URL manually:\n{url}\n");
+    let _ = webbrowser::open(&url);
+
+    print!("Paste the full URL here: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading pasted URL from stdin")?;
+    let pasted = line.trim();
+
+    let auth_code = extract_auth_code(pasted).ok_or_else(|| {
+        anyhow!(
+            "no authorization code found in the pasted URL — copy the FULL address-bar URL \
+             from the maplanding page (it must contain 'openid.oa2.authorization_code=')"
+        )
+    })?;
+
+    let (refresh_token, cookies) = register(
+        &tld,
+        &device_id,
+        &serial,
+        &auth_code,
+        &code_verifier,
+        &frc,
+        locale,
+        verbose,
+    )
+    .await?;
+
+    let mut state = RemoteState::load();
+    state.refresh_token = Some(refresh_token);
+    state.tld = tld;
+    if cookies.is_some() {
+        state.cookies = cookies;
+    }
+    // A fresh login invalidates any previously cached csrf.
+    state.csrf = None;
+    state.save()?;
+
+    println!(
+        "\nLogin successful — saved a durable refresh token to {}",
+        RemoteState::path().display()
+    );
+    println!("Run `alexa devices` to verify.");
+
+    // Best-effort verification; never fail the login if this errors.
+    match get_devices(&mut state, verbose).await {
+        Ok(devices) => println!("Verified: found {} Echo device(s).", devices.len()),
+        Err(e) => {
+            if verbose {
+                eprintln!("[remote] device verification skipped: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Behavior POST
 // ---------------------------------------------------------------------------
 
@@ -792,5 +1083,68 @@ mod tests {
         let s = form_encode(&[("app_name", "Amazon Alexa"), ("domain", ".amazon.com")]);
         assert!(s.contains("app_name=Amazon%20Alexa"));
         assert!(s.contains("domain=.amazon.com"));
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc7636_vector() {
+        // RFC 7636 Appendix B test vector.
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        assert_eq!(
+            pkce_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    #[test]
+    fn device_id_for_is_hex_of_serial_plus_type() {
+        // "FF" -> 0x46,0x46 ; "#A2IVLV5VM2W81" -> known hex suffix.
+        assert_eq!(
+            device_id_for("FF"),
+            "464623413249564c5635564d32573831"
+        );
+        // Decodes back to "<serial>#A2IVLV5VM2W81".
+        let decoded = hex::decode(device_id_for("ABCD")).unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "ABCD#A2IVLV5VM2W81");
+    }
+
+    #[test]
+    fn build_signin_url_has_key_params() {
+        let url = build_signin_url("com", "deadbeef", "CHALLENGE123", "en_US");
+        assert!(url.starts_with("https://www.amazon.com/ap/signin?"));
+        assert!(url.contains(
+            "openid.return_to=https%3A%2F%2Fwww.amazon.com%2Fap%2Fmaplanding"
+        ));
+        assert!(url.contains("openid.oa2.scope=device_auth_access"));
+        assert!(url.contains("openid.oa2.code_challenge_method=S256"));
+        assert!(url.contains("openid.oa2.code_challenge=CHALLENGE123"));
+        assert!(url.contains("openid.oa2.response_type=code"));
+        assert!(url.contains("openid.oa2.client_id=device%3Adeadbeef"));
+        assert!(url.contains("openid.assoc_handle=amzn_dp_project_dee_ios"));
+        assert!(url.contains("language=en_US"));
+    }
+
+    #[test]
+    fn build_signin_url_non_com_handle_suffix() {
+        let url = build_signin_url("co.uk", "abc", "C", "en_GB");
+        assert!(url.starts_with("https://www.amazon.co.uk/ap/signin?"));
+        assert!(url.contains("openid.assoc_handle=amzn_dp_project_dee_ios_uk"));
+        assert!(url.contains("pageId=amzn_dp_project_dee_ios_uk"));
+    }
+
+    #[test]
+    fn extract_auth_code_from_maplanding_url() {
+        let url = "https://www.amazon.com/ap/maplanding?openid.oa2.authorization_code=ANabc123def&\
+                   openid.assoc_handle=amzn_dp_project_dee_ios&openid.mode=id_res";
+        assert_eq!(
+            extract_auth_code(url),
+            Some("ANabc123def".to_string())
+        );
+        // Bare query string also works, and percent-decoding is applied.
+        assert_eq!(
+            extract_auth_code("openid.oa2.authorization_code=AN%2Bcode"),
+            Some("AN+code".to_string())
+        );
+        // Absent parameter -> None.
+        assert!(extract_auth_code("https://www.amazon.com/ap/maplanding?foo=bar").is_none());
     }
 }
