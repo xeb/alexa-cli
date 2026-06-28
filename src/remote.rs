@@ -952,7 +952,23 @@ pub async fn announce(
         }
         capable
     } else {
-        resolve_devices(&devices, name, false)?
+        let matched = resolve_devices(&devices, name, false)?;
+        // The API returns 200 even for offline / non-Echo targets, which then play
+        // nothing. Warn so a silent "success" isn't mysterious.
+        for d in &matched {
+            if !d.online {
+                eprintln!(
+                    "note: \"{}\" is offline — it can't play an announcement until it reconnects.",
+                    d.account_name
+                );
+            } else if !is_announceable(d) {
+                eprintln!(
+                    "note: \"{}\" is a {} device; only Echo speakers/Shows reliably play announcements.",
+                    d.account_name, d.device_family
+                );
+            }
+        }
+        matched
     };
 
     // An announcement call carries a single customerId, so group by owner. Batch
