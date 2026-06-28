@@ -1102,23 +1102,46 @@ fn ago(ts_ms: i64, now_ms: i64) -> String {
     }
 }
 
-/// Pull the `anti-csrftoken-a2z` value out of the activity page HTML
-/// (`<meta name="csrf-token" content="...">`). Tolerant of attribute order.
-pub fn extract_meta_csrf(html: &str) -> Option<String> {
-    // Find the csrf-token meta tag, then the content="..." within ~200 chars.
-    let idx = html.find("csrf-token")?;
-    let window = &html[idx..html.len().min(idx + 400)];
-    let c = window.find("content=")?;
-    let after = &window[c + "content=".len()..];
-    let quote = after.chars().next()?; // ' or "
-    let rest = &after[1..];
-    let end = rest.find(quote)?;
-    let val = &rest[..end];
-    if val.is_empty() {
-        None
-    } else {
-        Some(val.to_string())
+/// Read a `name="value"` / `name='value'` attribute out of an HTML fragment.
+fn find_attr(fragment: &str, attr: &str) -> Option<String> {
+    for q in ['"', '\''] {
+        let key = format!("{attr}={q}");
+        if let Some(p) = fragment.find(&key) {
+            let rest = &fragment[p + key.len()..];
+            if let Some(end) = rest.find(q) {
+                let val = &rest[..end];
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
     }
+    None
+}
+
+/// Pull the anti-csrf token out of the activity page's
+/// `<meta name="csrf-token" content="...">`. Anchors on the `csrf-token` name
+/// attribute (the page also contains similar-looking JS token names) and reads
+/// `content=` from a window around it, tolerant of attribute order/quoting.
+pub fn extract_meta_csrf(html: &str) -> Option<String> {
+    for anchor in [r#"name="csrf-token""#, r#"name='csrf-token'"#] {
+        if let Some(i) = html.find(anchor) {
+            // Window around the anchor, snapped outward to char boundaries so
+            // slicing never panics on multi-byte UTF-8.
+            let mut start = i.saturating_sub(200);
+            while start > 0 && !html.is_char_boundary(start) {
+                start -= 1;
+            }
+            let mut end = html.len().min(i + 300);
+            while end < html.len() && !html.is_char_boundary(end) {
+                end += 1;
+            }
+            if let Some(v) = find_attr(&html[start..end], "content") {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// Parse the customer-history-records response into transcript entries.
@@ -1193,11 +1216,22 @@ async fn fetch_anti_csrf(state: &RemoteState, verbose: bool) -> Result<String> {
         .get(&url)
         .header("Cookie", full_cookie_header(state))
         .header("User-Agent", BROWSER_USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml")
+        // We don't link gzip/brotli decoders, so insist on an uncompressed body.
+        .header("Accept-Encoding", "identity")
         .header("DNT", "1")
         .send()
         .await
         .context("fetching activity page")?;
+    let status = resp.status();
     let html = resp.text().await.unwrap_or_default();
+    if verbose {
+        eprintln!(
+            "[remote] activity page status={status} len={} (token found={})",
+            html.len(),
+            html.contains("name=\"csrf-token\"")
+        );
+    }
     extract_meta_csrf(&html).ok_or_else(|| {
         anyhow!("could not find the anti-csrf token on the activity page (cookies may be expired — re-run `alexa announce-login`)")
     })
@@ -1221,6 +1255,7 @@ async fn fetch_history_json(state: &RemoteState, anti_csrf: &str, verbose: bool)
         .header("Cookie", full_cookie_header(state))
         .header("User-Agent", BROWSER_USER_AGENT)
         .header("Referer", format!("https://www.amazon.{tld}/alexa-privacy/apd/activity"))
+        .header("Accept-Encoding", "identity")
         .header("DNT", "1")
         .body(serde_json::to_vec(&json!({ "previousRequestToken": null }))?)
         .send()
@@ -1521,9 +1556,12 @@ mod tests {
     fn extract_meta_csrf_parses_token() {
         let html = r#"<html><head><meta name="csrf-token" content="abc123=="></head></html>"#;
         assert_eq!(extract_meta_csrf(html), Some("abc123==".to_string()));
+        // content-before-name order is handled too.
         let single = "<meta content='tok-9' name='csrf-token'>";
-        // attribute-order tolerant: token found via the csrf-token anchor
-        assert!(extract_meta_csrf(single).is_some() || extract_meta_csrf(single).is_none());
+        assert_eq!(extract_meta_csrf(single), Some("tok-9".to_string()));
+        // similar-looking JS names must not match.
+        let decoy = r#"<script>var newCSRFToken="x"; "anti-csrftoken-a2z":"y"</script>"#;
+        assert!(extract_meta_csrf(decoy).is_none());
         assert!(extract_meta_csrf("<html>no token here</html>").is_none());
     }
 
