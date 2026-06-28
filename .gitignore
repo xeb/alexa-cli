@@ -1,16 +1,23 @@
+# Rust build output
+/target
+
+# Local Alexa config, tokens, cookies, caches, models — NEVER commit (contain secrets)
+/.alexa/
+config.json
+tokens.json
+tokens.db
+alexa_remote.json
+
+# Editor / IDE
+/.vscode/
+
+# Legacy Python-era artifacts
 __pycache__/
-.alexa/
+*.egg-info/
 .eggs/
+venv/
 build/
 dist/
-*.egg_info/
-alexa.egg-info/
-static/
-pwd/
-artifacts/
-old/
-.coverage
 .pytest_cache/
-tokens.db
-config.json
-/target
+.coverage
+artifacts/
