@@ -109,18 +109,30 @@ pub struct Device {
     pub account_name: String,
     pub customer_id: String,
     pub online: bool,
+    pub capabilities: Vec<String>,
 }
 
-/// Whether a device can actually receive an announcement: Echo speakers and
-/// Echo Show / Spot screens. Excludes Fire TV, tablets, Auto, Buds(non-speaker),
-/// third-party AVS gear, and the virtual AVS "devices" — including those in an
-/// announcement batch makes Amazon reject the whole request.
+/// Third-party "Alexa Built-in" / AVS speakers (Sonos, Bose, etc.) — their
+/// `deviceFamily` is `THIRD_PARTY_AVS_*` and their `online` flag is unreliable.
+fn is_third_party_avs(d: &Device) -> bool {
+    d.device_family
+        .to_ascii_uppercase()
+        .starts_with("THIRD_PARTY_AVS")
+}
+
+/// Whether a device is an announcement target: Echo speakers / Shows, plus Sonos
+/// and other third-party AVS speakers. Excludes Fire TVs, tablets, the phone app,
+/// Echo Auto cars, Frames, and the virtual AVS "devices" — a family allow-list,
+/// since a pure capability gate (AUDIO_PLAYER/MUSIC_SKILL) wrongly pulls in
+/// tablets/Fire TVs that can play music but shouldn't get every announcement.
 fn is_announceable(d: &Device) -> bool {
+    if d.device_type.is_empty() || d.serial_number.is_empty() {
+        return false;
+    }
     matches!(
         d.device_family.to_ascii_uppercase().as_str(),
         "ECHO" | "KNIGHT" | "ROOK"
-    ) && !d.device_type.is_empty()
-        && !d.serial_number.is_empty()
+    ) || is_third_party_avs(d)
 }
 
 /// Parse the `devices-v2/device` response. Entries without a serial number
@@ -159,6 +171,15 @@ fn parse_devices(v: &Value) -> Vec<Device> {
                     .unwrap_or("")
                     .to_string(),
                 online: d.get("online").and_then(|x| x.as_bool()).unwrap_or(false),
+                capabilities: d
+                    .get("capabilities")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -939,32 +960,34 @@ pub async fn announce(
     let devices = get_devices(&mut state, verbose).await?;
 
     // Choose targets. A named target matches by substring; otherwise (--all, the
-    // default) we select only online, announcement-capable Echo speakers — never
-    // the tablets / Fire TVs / Buds / third-party / virtual devices in the account.
+    // default) we select announcement speakers — Echos/Shows plus Sonos / third-party
+    // AVS — and skip tablets / Fire TVs / app / virtual devices. Echos must be online
+    // (that flag is reliable for them); third-party (Sonos) is included regardless,
+    // because its `online` flag is unreliable and Amazon still fans out to it.
     let targets: Vec<Device> = if all || name.is_none() {
         let capable: Vec<Device> = devices
             .iter()
-            .filter(|d| d.online && is_announceable(d))
+            .filter(|d| is_announceable(d) && (d.online || is_third_party_avs(d)))
             .cloned()
             .collect();
         if capable.is_empty() {
-            bail!("no online, announcement-capable Echo devices found — run `alexa devices`");
+            bail!("no announcement-capable speakers found online — run `alexa devices`");
         }
         capable
     } else {
         let matched = resolve_devices(&devices, name, false)?;
-        // The API returns 200 even for offline / non-Echo targets, which then play
-        // nothing. Warn so a silent "success" isn't mysterious.
+        // Amazon returns 200 even for targets that can't play; warn so a silent
+        // "success" isn't mysterious.
         for d in &matched {
-            if !d.online {
+            if !is_announceable(d) {
                 eprintln!(
-                    "note: \"{}\" is offline — it can't play an announcement until it reconnects.",
-                    d.account_name
-                );
-            } else if !is_announceable(d) {
-                eprintln!(
-                    "note: \"{}\" is a {} device; only Echo speakers/Shows reliably play announcements.",
+                    "note: \"{}\" ({}) isn't an announcement-capable speaker — it likely won't play.",
                     d.account_name, d.device_family
+                );
+            } else if !d.online {
+                eprintln!(
+                    "note: \"{}\" reports offline. Echo devices won't play until they reconnect; for Sonos / third-party this flag is unreliable, so it may still play.",
+                    d.account_name
                 );
             }
         }
@@ -1354,18 +1377,47 @@ mod tests {
             account_name: name.into(),
             customer_id: cust.into(),
             online,
+            capabilities: vec!["AUDIO_PLAYER".to_string()],
+        }
+    }
+
+    fn dev_caps(name: &str, family: &str, caps: &[&str]) -> Device {
+        Device {
+            serial_number: "S".into(),
+            device_type: "T".into(),
+            device_family: family.into(),
+            account_name: name.into(),
+            customer_id: "C".into(),
+            online: true,
+            capabilities: caps.iter().map(|s| s.to_string()).collect(),
         }
     }
 
     #[test]
-    fn is_announceable_only_echo_speakers() {
-        assert!(is_announceable(&dev_fam("Kitchen", "S", "T", "C", true, "ECHO")));
-        assert!(is_announceable(&dev_fam("Show", "S", "T", "C", true, "KNIGHT")));
-        assert!(!is_announceable(&dev_fam("Tablet", "S", "T", "C", true, "TABLET")));
-        assert!(!is_announceable(&dev_fam("FireTV", "S", "T", "C", true, "FIRE_TV")));
-        assert!(!is_announceable(&dev_fam("CLI", "S", "T", "C", true, "UNKNOWN")));
-        // Echo family but missing type/serial is not targetable.
-        assert!(!is_announceable(&dev_fam("Bad", "", "", "C", true, "ECHO")));
+    fn is_announceable_includes_third_party_excludes_non_speakers() {
+        // Echo speaker / Show.
+        assert!(is_announceable(&dev_caps("Kitchen", "ECHO", &[])));
+        assert!(is_announceable(&dev_caps("Show", "KNIGHT", &[])));
+        // Sonos / third-party AVS -> INCLUDED (the fix), even with no listed caps.
+        assert!(is_announceable(&dev_caps(
+            "Backyard",
+            "THIRD_PARTY_AVS_MEDIA_DISPLAY",
+            &[]
+        )));
+        assert!(is_announceable(&dev_caps(
+            "Sonos",
+            "THIRD_PARTY_AVS_SONOS_BOOTLEG",
+            &[]
+        )));
+        // Non-speakers -> excluded even though they can play music.
+        assert!(!is_announceable(&dev_caps("Fire", "FIRE_TV", &["AUDIO_PLAYER"])));
+        assert!(!is_announceable(&dev_caps("Tab", "TABLET", &["AUDIO_PLAYER"])));
+        assert!(!is_announceable(&dev_caps("CLI", "UNKNOWN", &[])));
+        assert!(!is_announceable(&dev_caps("App", "VOX", &[])));
+        // Missing serial/type -> never announceable.
+        let mut bad = dev_caps("Bad", "ECHO", &[]);
+        bad.serial_number.clear();
+        assert!(!is_announceable(&bad));
     }
 
     #[test]
