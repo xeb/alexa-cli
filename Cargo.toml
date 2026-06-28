@@ -1,6 +1,6 @@
 [package]
 name = "alexa-cli"
-version = "0.2.0"
+version = "1.0.2"
 edition = "2021"
 description = "Round-trip text through Alexa: TTS -> AVS -> Whisper STT"
 license = "MIT"
