@@ -872,34 +872,46 @@ async fn send_behavior(
     Ok(resp)
 }
 
-async fn check_behavior_response(resp: reqwest::Response, verbose: bool) -> Result<()> {
-    let status = resp.status();
-    if status.is_success() {
-        return Ok(());
-    }
-    let body = resp.text().await.unwrap_or_default();
-    if verbose {
-        eprintln!("[remote] behaviors error body: {}", snippet(&body));
-    }
-    bail!("behaviors/preview failed: {status}: {}", snippet(&body));
-}
-
-/// POST a behavior sequence, re-authenticating once on 401/403.
+/// POST a behavior sequence. Re-authenticates once on 401/403, and backs off and
+/// retries on 429 (1→2→4→8s). On persistent throttling returns a `RATE_LIMITED`
+/// error so callers can avoid hammering with a per-device fan-out.
 async fn post_behavior(state: &mut RemoteState, sequence_json: &str, verbose: bool) -> Result<()> {
-    let resp = send_behavior(state, sequence_json, verbose).await?;
-    let status = resp.status();
-    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-        if verbose {
-            eprintln!("[remote] behaviors returned {status}; re-authenticating and retrying once");
+    let mut reauthed = false;
+    let mut backoffs = 0u32;
+    loop {
+        let resp = send_behavior(state, sequence_json, verbose).await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
         }
-        state.cookies = None;
-        state.csrf = None;
-        // Refresh cookies + csrf (also re-saves state).
-        let _ = get_devices(state, verbose).await?;
-        let resp2 = send_behavior(state, sequence_json, verbose).await?;
-        return check_behavior_response(resp2, verbose).await;
+        if (status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN) && !reauthed {
+            if verbose {
+                eprintln!("[remote] behaviors returned {status}; re-authenticating and retrying");
+            }
+            state.cookies = None;
+            state.csrf = None;
+            get_devices(state, verbose).await?;
+            reauthed = true;
+            continue;
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS && backoffs < 4 {
+            let secs = 1u64 << backoffs; // 1, 2, 4, 8
+            if verbose {
+                eprintln!("[remote] 429 rate-limited; backing off {secs}s then retrying");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            backoffs += 1;
+            continue;
+        }
+        let body = resp.text().await.unwrap_or_default();
+        if verbose {
+            eprintln!("[remote] behaviors error body: {}", snippet(&body));
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            bail!("RATE_LIMITED: still throttled after retries: {}", snippet(&body));
+        }
+        bail!("behaviors/preview failed: {status}: {}", snippet(&body));
     }
-    check_behavior_response(resp, verbose).await
 }
 
 // ---------------------------------------------------------------------------
@@ -988,11 +1000,21 @@ async fn announce_resilient(
     verbose: bool,
 ) -> (usize, Vec<String>) {
     let batch = build_announcement_sequence_json(message, title, devices);
-    if post_behavior(state, &batch, verbose).await.is_ok() {
-        return (devices.len(), Vec::new());
-    }
-    if verbose {
-        eprintln!("[remote] batch rejected; retrying per device");
+    match post_behavior(state, &batch, verbose).await {
+        Ok(()) => return (devices.len(), Vec::new()),
+        Err(e) if e.to_string().contains("RATE_LIMITED") => {
+            // Throttled even after backoff — fanning out per-device would only make
+            // it worse. Report the group as skipped rather than hammering.
+            if verbose {
+                eprintln!("[remote] batch still rate-limited after backoff; not fanning out");
+            }
+            return (0, devices.iter().map(|d| d.account_name.clone()).collect());
+        }
+        Err(e) => {
+            if verbose {
+                eprintln!("[remote] batch rejected ({e}); retrying per device");
+            }
+        }
     }
     let mut sent = 0usize;
     let mut failed: Vec<String> = Vec::new();
@@ -1008,7 +1030,7 @@ async fn announce_resilient(
             }
         }
         // Gentle pacing so a fan-out of per-device calls isn't rate-limited.
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
     }
     (sent, failed)
 }
