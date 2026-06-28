@@ -6,6 +6,9 @@ use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
 fn tls_connector() -> TlsConnector {
+    // rustls 0.23 requires a process-default crypto provider before ClientConfig::builder().
+    // Idempotent: returns Err if already installed, which we ignore.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut cfg = rustls::ClientConfig::builder()
