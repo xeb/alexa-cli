@@ -16,7 +16,8 @@
 - **Region:** default NA gateway `https://alexa.na.gateway.devices.a2z.com`; EU `alexa.eu.gateway.devices.a2z.com`; FE `alexa.fe.gateway.devices.a2z.com`. Honor any `SetGateway` directive.
 - **Config home:** `~/.alexa/` (reuse the Python tool's dir). Read legacy `config.json` keys `clientId`, `clientSecret`, `programId` verbatim.
 - **STT:** CPU only — no CUDA/Metal features. Default model `base.en`; `tiny.en` selectable.
-- **TTS:** default `piper` (16 kHz native voice); `espeak` fallback via `--voice espeak`.
+- **TTS:** default `piper` (a Piper VITS voice run via the **`sherpa-onnx`** crate, 16 kHz); `espeak` fallback via `--voice espeak` (shells out to the system `espeak-ng`). **Do NOT use `piper-rs`** — its transitive `espeak-rs-sys` dependency fails to build espeak-ng from source on this system (glibc `_FORTIFY_SOURCE` "buffer overflow detected" abort during intonation-data compilation). `sherpa-onnx` ships a prebuilt native lib and avoids that build entirely (verified to compile here).
+- **Verified crate APIs (already checked against installed source, use as-is):** `whisper-rs` 0.16 — `WhisperContext::new_with_params(path, WhisperContextParameters::default())`, `ctx.create_state()`, `FullParams::new(SamplingStrategy::Greedy { best_of: 1 })`, `state.full(params, &[f32])`, `state.full_n_segments() -> i32` (NOT a Result), `state.get_segment(i) -> Option<WhisperSegment>`, `seg.to_str_lossy() -> Result<Cow<str>>`. `sherpa-onnx` 1.13.3 — `OfflineTts::create(&OfflineTtsConfig) -> Option<Self>`, `tts.generate_with_config(text, &GenerationConfig, None::<fn(&[f32],f32)->bool>) -> Option<GeneratedAudio>`, `audio.samples() -> &[f32]`, `audio.sample_rate() -> i32`; all config structs derive `Default`.
 - **Binary name:** `alexa`. Crate lib name: `alexa_cli`.
 - **f32→i16:** always clamp to `[-32768, 32767]`.
 - **Error handling:** `anyhow::Result` at boundaries; user-facing errors must say what to run next (`alexa configure` / `alexa login`).
@@ -159,7 +160,7 @@ rustls = "0.23"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 whisper-rs = "0.16"
-piper-rs = "0.2"
+sherpa-onnx = "1"
 
 [dev-dependencies]
 tempfile = "3"
@@ -1238,10 +1239,12 @@ pub fn transcribe_samples(samples_16k_mono: &[f32], model_path: &Path) -> Result
     params.set_language(Some("en"));
     state.full(params, samples_16k_mono).context("running whisper")?;
 
-    let n = state.full_n_segments().context("counting segments")?;
+    let n = state.full_n_segments(); // i32, not a Result
     let mut out = String::new();
     for i in 0..n {
-        out.push_str(&state.full_get_segment_text(i).unwrap_or_default());
+        if let Some(seg) = state.get_segment(i) {
+            out.push_str(&seg.to_str_lossy().unwrap_or_default());
+        }
     }
     Ok(out.trim().to_string())
 }
@@ -1253,7 +1256,7 @@ pub fn transcribe_mp3(mp3: &[u8], config: &Config) -> Result<String> {
 }
 ```
 
-Note: `reqwest::blocking` requires the `blocking` feature. Update `Cargo.toml` reqwest features to `["rustls-tls", "json", "blocking"]`. Verify whisper-rs 0.16 API (`WhisperContext::new_with_params`, `state.full`, `full_get_segment_text`). Adjust if the version's signatures differ; behavior pinned by the ignored live test.
+Note: `reqwest::blocking` requires the `blocking` feature — Task 1's `Cargo.toml` already includes it (`["rustls-tls", "json", "blocking"]`). The whisper-rs 0.16 API above is verified against installed source (see Global Constraints); use it as written.
 
 - [ ] **Step 4: Run tests**
 
@@ -1398,29 +1401,39 @@ git commit -m "feat: espeak-ng TTS backend + TtsBackend trait"
 
 ---
 
-### Task 10: TTS Piper backend (`tts/piper.rs`)
+### Task 10: TTS Piper backend via `sherpa-onnx` (`tts/piper.rs`)
 
 **Files:**
 - Modify: `src/tts/piper.rs` (replace stub)
 
 **Interfaces:**
-- Consumes: `audio::f32_to_i16`, `Config::models_dir`, `reqwest::blocking`
+- Consumes: `audio::{f32_to_i16, resample_to_16k}`, `Config::models_dir`, `reqwest::blocking`, `sherpa-onnx`
 - Produces: `Piper` (impl `TtsBackend`)
 
-- [ ] **Step 1: Write a pure unit test for the voice-asset paths**
+**Why sherpa-onnx (not piper-rs):** `piper-rs` pulls `espeak-rs-sys`, which fails to build espeak-ng from source on this system (glibc `_FORTIFY_SOURCE` abort). `sherpa-onnx` ships a prebuilt native lib and runs the same Piper VITS voice. The voice is distributed by sherpa as a `.tar.bz2` that bundles the `.onnx`, `tokens.txt`, and `espeak-ng-data/` (required for phonemization).
+
+- [ ] **Step 1: Write pure unit tests for the model URL + asset layout**
 
 ```rust
 // src/tts/piper.rs  (append)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
-    fn voice_asset_urls_are_wellformed() {
-        let (onnx, json) = voice_asset_urls();
-        assert!(onnx.ends_with("en_US-lessac-low.onnx"));
-        assert!(json.ends_with("en_US-lessac-low.onnx.json"));
-        assert!(onnx.starts_with("https://"));
+    fn voice_tarball_url_wellformed() {
+        let url = voice_tarball_url();
+        assert!(url.starts_with("https://"));
+        assert!(url.ends_with("vits-piper-en_US-lessac-low.tar.bz2"));
+    }
+
+    #[test]
+    fn voice_asset_layout() {
+        let a = voice_assets(&PathBuf::from("/models/vits-piper-en_US-lessac-low"));
+        assert!(a.model.ends_with("en_US-lessac-low.onnx"));
+        assert!(a.tokens.ends_with("tokens.txt"));
+        assert!(a.data_dir.ends_with("espeak-ng-data"));
     }
 }
 ```
@@ -1428,95 +1441,132 @@ mod tests {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cargo test --lib piper`
-Expected: FAIL — `voice_asset_urls` not defined.
+Expected: FAIL — `voice_tarball_url`/`voice_assets` not defined.
 
 - [ ] **Step 3: Implement**
 
 ```rust
 // src/tts/piper.rs  (replace file contents)
-use crate::audio::f32_to_i16;
+use crate::audio::{f32_to_i16, resample_to_16k};
 use crate::config::Config;
 use crate::tts::TtsBackend;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
-use std::sync::Arc;
+use sherpa_onnx::{
+    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
+};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-const VOICE: &str = "en_US-lessac-low";
-const BASE: &str = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/low";
+const VOICE: &str = "vits-piper-en_US-lessac-low";
+const TARBALL_BASE: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models";
 
-fn voice_asset_urls() -> (String, String) {
-    (format!("{BASE}/{VOICE}.onnx"), format!("{BASE}/{VOICE}.onnx.json"))
+fn voice_tarball_url() -> String {
+    format!("{TARBALL_BASE}/{VOICE}.tar.bz2")
 }
 
-fn download_to(path: &PathBuf, url: &str) -> Result<()> {
-    if path.exists() {
-        return Ok(());
+struct VoiceAssets {
+    model: String,
+    tokens: String,
+    data_dir: String,
+}
+
+fn voice_assets(dir: &Path) -> VoiceAssets {
+    VoiceAssets {
+        model: dir.join("en_US-lessac-low.onnx").to_string_lossy().into_owned(),
+        tokens: dir.join("tokens.txt").to_string_lossy().into_owned(),
+        data_dir: dir.join("espeak-ng-data").to_string_lossy().into_owned(),
     }
-    eprintln!("downloading piper voice asset {} ...", path.display());
-    let bytes = reqwest::blocking::get(url)
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.bytes())
-        .with_context(|| format!("downloading {url}"))?;
-    std::fs::write(path, &bytes)?;
-    Ok(())
 }
 
 fn ensure_voice() -> Result<PathBuf> {
-    let dir = Config::models_dir();
-    std::fs::create_dir_all(&dir)?;
-    let onnx = dir.join(format!("{VOICE}.onnx"));
-    let json = dir.join(format!("{VOICE}.onnx.json"));
-    let (onnx_url, json_url) = voice_asset_urls();
-    download_to(&onnx, &onnx_url)?;
-    download_to(&json, &json_url)?;
-    Ok(onnx)
+    let models = Config::models_dir();
+    let dir = models.join(VOICE);
+    if dir.join("en_US-lessac-low.onnx").exists() {
+        return Ok(dir);
+    }
+    std::fs::create_dir_all(&models)?;
+    let url = voice_tarball_url();
+    eprintln!("downloading piper voice {VOICE} ...");
+    let bytes = reqwest::blocking::get(&url)
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .with_context(|| format!("downloading {url}"))?;
+    let tarball = models.join(format!("{VOICE}.tar.bz2"));
+    std::fs::write(&tarball, &bytes)?;
+    let status = Command::new("tar")
+        .arg("xjf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&models)
+        .status()
+        .context("extracting voice tarball (need the `tar` command)")?;
+    if !status.success() {
+        anyhow::bail!("tar extraction failed for {VOICE}");
+    }
+    let _ = std::fs::remove_file(&tarball);
+    Ok(dir)
 }
 
 pub struct Piper {
-    model_path: PathBuf,
+    dir: PathBuf,
 }
 
 impl Piper {
     pub fn new() -> Result<Piper> {
-        Ok(Piper { model_path: ensure_voice()? })
+        Ok(Piper { dir: ensure_voice()? })
     }
 }
 
 impl TtsBackend for Piper {
     fn synth(&self, text: &str) -> Result<Vec<i16>> {
-        use piper_rs::synth::PiperSpeechSynthesizer;
-        let model = piper_rs::from_config_path(
-            &self.model_path.with_extension("onnx.json"),
-        )
-        .context("loading piper voice config")?;
-        let synth = PiperSpeechSynthesizer::new(model).context("creating piper synthesizer")?;
-        let mut samples: Vec<f32> = Vec::new();
-        synth
-            .synthesize_to_buffer(text, &mut samples)
-            .context("piper synthesis")?;
-        // en_US-lessac-low is 16 kHz native; no resample needed.
+        let a = voice_assets(&self.dir);
+        let config = OfflineTtsConfig {
+            model: OfflineTtsModelConfig {
+                vits: OfflineTtsVitsModelConfig {
+                    model: Some(a.model),
+                    tokens: Some(a.tokens),
+                    data_dir: Some(a.data_dir),
+                    ..Default::default()
+                },
+                num_threads: 1,
+                ..Default::default()
+            },
+            max_num_sentences: 1,
+            ..Default::default()
+        };
+        let tts = OfflineTts::create(&config)
+            .context("creating sherpa OfflineTts (check voice assets exist)")?;
+        let audio = tts
+            .generate_with_config(
+                text,
+                &GenerationConfig { sid: 0, speed: 1.0, ..Default::default() },
+                None::<fn(&[f32], f32) -> bool>,
+            )
+            .context("sherpa/piper synthesis returned no audio")?;
+        let rate = audio.sample_rate() as u32;
+        let samples = if rate == 16000 {
+            audio.samples().to_vec()
+        } else {
+            resample_to_16k(audio.samples(), rate)?
+        };
         Ok(f32_to_i16(&samples))
     }
 }
-
-// keep Arc import used if needed by piper-rs; remove if unused.
-#[allow(unused_imports)]
-use std::marker::PhantomData as _Unused;
-let _ = Arc::new(());
 ```
 
-Note: the exact `piper-rs` 0.2 API (`from_config_path`, `PiperSpeechSynthesizer::new`, `synthesize_to_buffer`) must be verified against its docs — adapt names/sample-rate handling as needed. **Fallback path** if `piper-rs`/`ort` won't build: replace `synth` with a shell-out to the `piper` binary (`piper --model <onnx> --output_file -`) and decode the WAV via `crate::tts::espeak::wav_bytes_to_16k_mono_i16`. Remove the stray `let _ = Arc::new(());` line — it is illustrative only; do not put statements at module scope.
+Note: the `sherpa-onnx` 1.13.3 API above is verified against installed source (see Global Constraints — `OfflineTts::create`, `generate_with_config`, `GeneratedAudio::{samples,sample_rate}`, all config structs `#[derive(Default)]`). The `None::<fn(&[f32], f32) -> bool>` is the no-progress-callback. `en_US-lessac-low` is 16 kHz, so resampling is a no-op but kept for safety. Do NOT download the voice in unit tests (Step 1 tests are pure path/URL checks).
 
-- [ ] **Step 4: Run unit test**
+- [ ] **Step 4: Run unit tests**
 
-Run: `cargo test --lib piper::tests::voice_asset_urls_are_wellformed`
-Expected: PASS. Also `cargo build` must succeed.
+Run: `cargo test --lib piper`
+Expected: PASS (2 tests). Also `cargo build` must succeed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/tts/piper.rs
-git commit -m "feat: piper neural TTS backend (16kHz native)"
+git commit -m "feat: piper TTS backend via sherpa-onnx (16kHz VITS voice)"
 ```
 
 ---

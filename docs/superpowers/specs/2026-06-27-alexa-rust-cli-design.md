@@ -133,13 +133,18 @@ refresh + retry (mirrors `request_from_alexa_retry`).
 `trait TtsBackend { fn synth(&self, text: &str) -> Result<Vec<i16>>; }` returning
 **16 kHz, 16-bit, mono** samples. Backend chosen by `--voice` (default `piper`):
 
-- **Piper (default):** a "low" quality voice (e.g. `en_US-lessac-low`) which is **16 kHz
+- **Piper (default):** a "low" quality voice (`en_US-lessac-low`) which is **16 kHz
   native**, so output is f32 → i16 (clamped to `[-32768, 32767]`) with no resampling.
-  Primary integration: the `piper-rs` crate (in-process ONNX via `ort`). Voice model
-  (`.onnx` + `.onnx.json`) auto-downloaded to `~/.alexa/models/` on first use.
-  - *Implementation fallback:* if `piper-rs`/`ort` (currently an `ort` 2.0 release
-    candidate) proves unstable to build, shell out to the `piper` binary writing a WAV
-    and read it with `hound`. This is an internal detail behind `TtsBackend`.
+  Integration: the **`sherpa-onnx`** crate runs the Piper VITS voice in-process. The
+  voice package (`.onnx` + `tokens.txt` + `espeak-ng-data/`) is auto-downloaded and
+  extracted to `~/.alexa/models/` on first use.
+  - *Why not `piper-rs`:* it pulls `espeak-rs-sys`, which fails to build espeak-ng from
+    source on the target system (glibc `_FORTIFY_SOURCE` "buffer overflow detected"
+    abort during intonation-data compilation). `sherpa-onnx` ships a **prebuilt** native
+    lib, sidestepping that build, and was verified to compile cleanly here.
+  - *Implementation fallback:* if `sherpa-onnx` ever fails, shell out to a `piper`
+    binary writing a WAV and read it with `hound` — an internal detail behind
+    `TtsBackend`.
 - **espeak (`--voice espeak`):** shell out to the `espeak-ng` binary
   (`espeak-ng --stdout`), parse the WAV with `hound` (i16 @ 22050), resample to 16 kHz
   with `rubato`. Fastest path; robotic. Requires the system `espeak-ng` package.
@@ -232,7 +237,7 @@ performs one real round-trip, printing exactly where it fails.
 | JSON | `serde` + `serde_json` | 1.x | events/directives/config |
 | Multipart parse | `multer` (optional) | 3.x | cross-check hand-rolled parser |
 | UUID | `uuid` (v4) | 1.x | messageId / dialogRequestId / DSN |
-| TTS (default) | `piper-rs` | 0.2 | Piper neural; `ort` onnxruntime (RC — fallback: shell `piper`) |
+| TTS (default) | `sherpa-onnx` | 1.13 | Runs Piper VITS voice; prebuilt native lib (NOT `piper-rs`, which fails to build espeak-ng from source) |
 | TTS (fallback) | shell `espeak-ng` | system pkg | `--voice espeak` |
 | STT | `whisper-rs` | 0.16 | whisper.cpp; `base.en`/`tiny.en` ggml |
 | MP3 decode | `symphonia` (mp3) | 0.5 | decode Alexa's AUDIO_MPEG |
