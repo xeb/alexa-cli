@@ -5,7 +5,11 @@ use clap::{Parser, Subcommand};
 use std::io::{self, Read};
 
 #[derive(Parser, Debug)]
-#[command(name = "alexa", version, about = "Round-trip text through Alexa: TTS -> AVS -> Whisper STT")]
+#[command(
+    name = "alexa",
+    version,
+    about = "Round-trip text through Alexa: TTS -> AVS -> Whisper STT"
+)]
 pub struct Cli {
     /// Text to send to Alexa, e.g. "what time is it". Reads stdin if omitted with `-`.
     pub text: Option<String>,
@@ -98,7 +102,10 @@ pub async fn run() -> Result<()> {
 
     let answer = ask(&cli, &text).await?;
     if cli.json {
-        println!("{}", serde_json::json!({ "success": true, "result": answer }));
+        println!(
+            "{}",
+            serde_json::json!({ "success": true, "result": answer })
+        );
     } else {
         println!("{answer}");
     }
@@ -184,7 +191,10 @@ fn read_stdin() -> Result<String> {
 
 fn configure() -> Result<()> {
     let mut cfg = Config::load_or_default();
-    println!("Configuring AVS credentials (stored in {}).", Config::path().display());
+    println!(
+        "Configuring AVS credentials (stored in {}).",
+        Config::path().display()
+    );
     println!("Press Enter to keep the current value shown in [brackets].\n");
     cfg.client_id = prompt("Client ID", &cfg.client_id)?;
     cfg.client_secret = prompt("Client Secret", &cfg.client_secret)?;

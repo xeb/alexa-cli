@@ -35,7 +35,10 @@ impl Cache {
 
     #[cfg(test)]
     pub fn empty_for_test() -> Cache {
-        Cache { path: PathBuf::from("/dev/null"), map: HashMap::new() }
+        Cache {
+            path: PathBuf::from("/dev/null"),
+            map: HashMap::new(),
+        }
     }
     #[cfg(test)]
     pub fn put_mem(&mut self, key: &str, transcript: &str) {

@@ -36,11 +36,7 @@ pub fn decode_mp3_to_16k_mono(mp3: &[u8]) -> Result<Vec<f32>> {
     let mut channels = 1usize;
     let mut rate = 0u32;
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(_) => break, // end of stream
-        };
+    while let Ok(packet) = format.next_packet() {
         if packet.track_id() != track_id {
             continue;
         }
@@ -130,7 +126,11 @@ mod tests {
         let mp3 = include_bytes!("../tests/fixtures/sample.mp3");
         let samples = decode_mp3_to_16k_mono(mp3).unwrap();
         // ~0.5s at 16kHz -> a few thousand samples; allow generous bounds
-        assert!(samples.len() > 4000 && samples.len() < 12000, "got {}", samples.len());
+        assert!(
+            samples.len() > 4000 && samples.len() < 12000,
+            "got {}",
+            samples.len()
+        );
         // sine should have non-trivial amplitude
         let peak = samples.iter().cloned().fold(0.0f32, |a, b| a.max(b.abs()));
         assert!(peak > 0.1, "peak {peak}");

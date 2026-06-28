@@ -180,12 +180,11 @@ mod tests {
 
     #[test]
     fn authorize_url_contains_scope_and_product() {
-        let cfg = {
-            let mut c = Config::default();
-            c.client_id = "cid".into();
-            c.product_id = "prod".into();
-            c.device_serial_number = "dsn".into();
-            c
+        let cfg = Config {
+            client_id: "cid".into(),
+            product_id: "prod".into(),
+            device_serial_number: "dsn".into(),
+            ..Default::default()
         };
         let url = authorize_url(&cfg, "http://localhost:8086/auth");
         assert!(url.contains("client_id=cid"));

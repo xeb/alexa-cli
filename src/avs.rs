@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::config::Config;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -62,7 +62,8 @@ pub async fn recognize(config: &Config, token: &str, pcm: &[u8]) -> Result<Vec<u
     let event = recognize_event_json(&Uuid::new_v4().to_string(), &Uuid::new_v4().to_string());
     let boundary = format!("alexa-{}", Uuid::new_v4());
     let body = build_recognize_multipart(&event, pcm, &boundary);
-    let (status, ct, resp_body) = post_multipart(&mut send_req, &host, token, &boundary, body).await?;
+    let (status, ct, resp_body) =
+        post_multipart(&mut send_req, &host, token, &boundary, body).await?;
 
     // Keep the downchannel handles alive until the round-trip completes.
     drop(_dc_resp);
@@ -113,7 +114,10 @@ async fn post_multipart(
         .method("POST")
         .uri(format!("https://{host}/v20160207/events"))
         .header("authorization", format!("Bearer {token}"))
-        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
         .body(())
         .unwrap();
 
@@ -183,13 +187,22 @@ pub fn build_recognize_multipart(event_json: &str, pcm: &[u8], boundary: &str) -
     let push = |out: &mut Vec<u8>, s: &str| out.extend_from_slice(s.as_bytes());
 
     push(&mut out, &format!("--{boundary}\r\n"));
-    push(&mut out, "Content-Disposition: form-data; name=\"metadata\"\r\n");
-    push(&mut out, "Content-Type: application/json; charset=UTF-8\r\n\r\n");
+    push(
+        &mut out,
+        "Content-Disposition: form-data; name=\"metadata\"\r\n",
+    );
+    push(
+        &mut out,
+        "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+    );
     push(&mut out, event_json);
     push(&mut out, "\r\n");
 
     push(&mut out, &format!("--{boundary}\r\n"));
-    push(&mut out, "Content-Disposition: form-data; name=\"audio\"\r\n");
+    push(
+        &mut out,
+        "Content-Disposition: form-data; name=\"audio\"\r\n",
+    );
     push(&mut out, "Content-Type: application/octet-stream\r\n\r\n");
     out.extend_from_slice(pcm);
     push(&mut out, "\r\n");
@@ -260,7 +273,10 @@ pub fn parse_multipart_related(content_type: &str, body: &[u8]) -> Result<Vec<Pa
         let headers: Vec<(String, String)> = header_blob
             .split("\r\n")
             .filter(|l| !l.is_empty())
-            .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+            .filter_map(|l| {
+                l.split_once(':')
+                    .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            })
             .collect();
 
         let content_start = header_end + 4;
@@ -304,11 +320,15 @@ pub fn extract_speak_audio(parts: &[Part]) -> Result<Vec<u8>> {
             }
         }
     }
-    let cid = cid.ok_or_else(|| anyhow::anyhow!("no SpeechSynthesizer.Speak directive in response"))?;
+    let cid =
+        cid.ok_or_else(|| anyhow::anyhow!("no SpeechSynthesizer.Speak directive in response"))?;
 
     for p in parts {
         if let Some(content_id) = p.header("Content-ID") {
-            let normalized = content_id.trim().trim_start_matches('<').trim_end_matches('>');
+            let normalized = content_id
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>');
             if normalized == cid {
                 return Ok(p.body.clone());
             }
@@ -330,7 +350,10 @@ mod tests {
         assert_eq!(v["event"]["header"]["messageId"], "mid-1");
         assert_eq!(v["event"]["header"]["dialogRequestId"], "drid-1");
         assert_eq!(v["event"]["payload"]["profile"], "CLOSE_TALK");
-        assert_eq!(v["event"]["payload"]["format"], "AUDIO_L16_RATE_16000_CHANNELS_1");
+        assert_eq!(
+            v["event"]["payload"]["format"],
+            "AUDIO_L16_RATE_16000_CHANNELS_1"
+        );
         assert_eq!(v["event"]["payload"]["initiator"]["type"], "TAP");
     }
 
@@ -345,7 +368,8 @@ mod tests {
 
     #[test]
     fn multipart_body_has_both_parts_and_raw_audio() {
-        let body = build_recognize_multipart("{\"event\":true}", &[0xDE, 0xAD, 0xBE, 0xEF], "BOUNDARY");
+        let body =
+            build_recognize_multipart("{\"event\":true}", &[0xDE, 0xAD, 0xBE, 0xEF], "BOUNDARY");
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("--BOUNDARY\r\n"));
         assert!(text.contains("Content-Disposition: form-data; name=\"metadata\""));
@@ -369,12 +393,16 @@ mod response_tests {
                 "header": { "namespace": "SpeechSynthesizer", "name": "Speak" },
                 "payload": { "url": "cid:audio-123", "format": "AUDIO_MPEG" }
             }
-        }).to_string();
+        })
+        .to_string();
         let mp3 = vec![0xFF, 0xFB, 0x10, 0x00, 1, 2, 3, 4]; // fake mp3 bytes
         let mut body = Vec::new();
         let push = |b: &mut Vec<u8>, s: &str| b.extend_from_slice(s.as_bytes());
         push(&mut body, &format!("--{boundary}\r\n"));
-        push(&mut body, "Content-Type: application/json; charset=UTF-8\r\n\r\n");
+        push(
+            &mut body,
+            "Content-Type: application/json; charset=UTF-8\r\n\r\n",
+        );
         push(&mut body, &directive);
         push(&mut body, "\r\n");
         push(&mut body, &format!("--{boundary}\r\n"));
@@ -403,7 +431,10 @@ mod response_tests {
 
     #[test]
     fn extract_errors_when_no_speak() {
-        let parts = vec![Part { headers: vec![], body: b"x".to_vec() }];
+        let parts = vec![Part {
+            headers: vec![],
+            body: b"x".to_vec(),
+        }];
         assert!(extract_speak_audio(&parts).is_err());
     }
 }
@@ -420,7 +451,10 @@ mod transport_tests {
         // Real assertion is "no panic in the transport"; if Alexa does return a Speak
         // directive, its MP3 payload must be non-empty.
         if let Ok(mp3) = super::recognize(&cfg, &token, &pcm).await {
-            assert!(!mp3.is_empty(), "Speak audio must be non-empty when present");
+            assert!(
+                !mp3.is_empty(),
+                "Speak audio must be non-empty when present"
+            );
         }
     }
 }

@@ -27,7 +27,10 @@ impl TtsBackend for Espeak {
             .output()
             .context("running espeak-ng (is it installed? `sudo apt install espeak-ng`)")?;
         if !output.status.success() {
-            anyhow::bail!("espeak-ng failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "espeak-ng failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         wav_bytes_to_16k_mono_i16(&output.stdout)
     }

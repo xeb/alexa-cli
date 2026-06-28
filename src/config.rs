@@ -105,9 +105,7 @@ impl Config {
         Ok(())
     }
     pub fn is_complete(&self) -> bool {
-        !self.client_id.is_empty()
-            && !self.client_secret.is_empty()
-            && !self.product_id.is_empty()
+        !self.client_id.is_empty() && !self.client_secret.is_empty() && !self.product_id.is_empty()
     }
 }
 
@@ -117,9 +115,18 @@ mod tests {
 
     #[test]
     fn region_gateway_hosts() {
-        assert_eq!(Region::Na.gateway_host(), "alexa.na.gateway.devices.a2z.com");
-        assert_eq!(Region::Eu.gateway_host(), "alexa.eu.gateway.devices.a2z.com");
-        assert_eq!(Region::Fe.gateway_host(), "alexa.fe.gateway.devices.a2z.com");
+        assert_eq!(
+            Region::Na.gateway_host(),
+            "alexa.na.gateway.devices.a2z.com"
+        );
+        assert_eq!(
+            Region::Eu.gateway_host(),
+            "alexa.eu.gateway.devices.a2z.com"
+        );
+        assert_eq!(
+            Region::Fe.gateway_host(),
+            "alexa.fe.gateway.devices.a2z.com"
+        );
     }
 
     #[test]
@@ -160,8 +167,10 @@ mod tests {
 
     #[test]
     fn roundtrip_serialization_uses_legacy_keys() {
-        let mut cfg = Config::default();
-        cfg.client_id = "id".into();
+        let cfg = Config {
+            client_id: "id".into(),
+            ..Default::default()
+        };
         let s = serde_json::to_string(&cfg).unwrap();
         assert!(s.contains("\"clientId\":\"id\""));
         let back: Config = serde_json::from_str(&s).unwrap();

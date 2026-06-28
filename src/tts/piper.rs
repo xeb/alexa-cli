@@ -3,7 +3,8 @@ use crate::config::Config;
 use crate::tts::TtsBackend;
 use anyhow::{Context, Result};
 use sherpa_onnx::{
-    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig,
+    GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsModelConfig,
+    OfflineTtsVitsModelConfig,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
