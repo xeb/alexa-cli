@@ -1,204 +1,121 @@
 # Alexa CLI
 
-A command line interface for Alexa. 
+`alexa` is a command-line tool that round-trips text through Alexa: it
+synthesizes your prompt to speech, sends that audio to the Alexa Voice
+Service (AVS), and transcribes Alexa's spoken reply back to text using a
+local Whisper model.
 
-The goal of this project is to create both a single-file standalone Python script as well as a pip package to communicate with Alexa via the command line.
-
-# Examples
 ```
-$ alexa "turn off the bedroom light"
-okay
+$ alexa "what time is it"
+the time is eleven seventeen p m
 
-$ alexa "play all along the watch tower on kitchen"
-all along the watch tower by the jimmy hendric's experience playing on kitchen
-
-$ alexa -tg "what is the price of bitcoin" # forces transcribe via Google
-one Bitcoin is worth $8,250 up less than 1% over the last 24 hours
-
-$ alexa "how many days until Christmas"
-there are 220 days until Christmas Day
+$ alexa "how many days until christmas"
+there are 181 days until christmas day
 ```
 
+This is a complete Rust rewrite that replaces the legacy Python tool. It
+talks to the modern AVS HTTP/2 API (`v20160207`) and does all speech
+recognition locally with whisper.cpp (via `whisper-rs`) — no cloud STT.
 
-# Getting Started
+## How it works
 
-## Dependencies
-There are many dependencies you will need. 
+1. **TTS** — your text is synthesized to 16 kHz mono PCM. The default
+   backend is Piper (a VITS voice run through `sherpa-onnx`); `--voice
+   espeak` shells out to the system `espeak-ng` instead.
+2. **AVS** — the PCM is streamed to the Alexa Voice Service over a single
+   multiplexed HTTP/2 connection. Alexa returns an MP3 of its spoken
+   response.
+3. **STT** — the MP3 is decoded and transcribed locally with Whisper
+   (`base.en` by default, `tiny.en` selectable). CPU only.
 
-For Linux (Debian/Ubuntu) try:
+## Prerequisites
+
+- A C compiler and `cmake` (whisper.cpp is built from source by
+  `whisper-rs`).
+- `espeak-ng` — only required if you use `--voice espeak`. The default
+  Piper backend needs no extra system packages.
+
+## Install
+
 ```
-sudo apt install -y festival sox curl ffmpeg
-```
-
-Check to ensure the following commands are working and executable from your shell:
-
-- `sox`
-- `text2wave` (Festival)
-- `ffmpeg` (ffmpeg)
-- `curl`
-
-### Notes to Mac Users
-Festival (which contains text2wave) can be found at [github.com/pettarin/setup-festival-mbrola](https://github.com/pettarin/setup-festival-mbrola)
-
-## Transcription Dependency
-You can choose one of two transcription services. Google Cloud or Mozilla's Deepspeech. Google may cost you some money but is generally better. Deepspeech runs slower (depending on your GPU) but runs locally. 
-
-See the section below for specific instructions.
-
-### If using Google
-Be sure the following command works:
-- `gcloud`
-
-See: https://cloud.google.com/sdk/docs/downloads-apt-get
-
-### If using Deepspeech
-Be sure the following command works:
-- `deepspeech`
-
-See sections below for more information
-
-## Installation
-Clone this repository 
-```
-git clone https://github.com/xeb/alexa-cli
-```
-
-Run the install via:
-```
+cargo install --path .
+# or
 make install
 ```
 
-Verify the tool installed correctly by just running:
-```
-alexa
-```
-which should display the help menu
+This installs the `alexa` binary.
 
-## Configuration
-You will need to setup an AVS (Alexa Voice Service) developer account as well as link your Amazon account.
+## AVS credentials
 
-### Start the Configuration Process
-Run: 
-```
-alexa --configure
-```
+You need an existing AVS product / security profile. Amazon has closed new
+AVS device registrations, so you must reuse credentials from a product you
+already own. You will need the **Client ID**, **Client Secret**, and
+**Product ID** (the legacy `programId`).
 
-### AVS Account
-1) Visit [developer.amazon.com/avs/home.html#/avs/home](https://developer.amazon.com/avs/home.html#/avs/home)
-2) Create a new Product
-3) Enter your Client ID, Client Secret and Program ID into the command line
+## Setup
 
-IMPORTANT: you need to register the OAuth URLs to authenticate with your Amazon account tokens. If you are only using this tool locally, just add localhost. If you are setting it up remotely, you will need to add a remote endpoint that can access the server you are running the script on. This is only required for setup.
+1. **Configure credentials:**
 
-Under "Security Profile" in the AVS Console add:
+   ```
+   alexa configure
+   ```
 
-- Allowed origin of `http://localhost:8086`
-- Allowed return URLs of `http://localhost:8089/auth`
+   Enter your Client ID, Client Secret, and Product ID. Configuration is
+   stored in `~/.alexa/config.json` (the same directory the Python tool
+   used; legacy `clientId` / `clientSecret` / `programId` keys are read
+   verbatim).
 
+2. **Register the return URL.** In the Amazon developer console, under your
+   security profile, add this allowed return URL:
 
-### Save Transcription
-You will be prompted if you want to save transcriptions. This is helpful. A small database will be kept in `~/.alexa/transcriptions.db` to avoid re-transcribing the same audio responses from Alexa. But you don't have to do this.
+   ```
+   http://localhost:8086/auth
+   ```
 
-### Transcription Type
-Decide if you would like to use Deepspeech or not. If you do decide to use Deepspeech, you will have to enter the path to the models. 
+3. **Log in:**
 
-NOTE: the tool supports changing transcription type at runtime. Use the flag `-tg` to force Google transcriptions or `-td` to force Deepspeech transcriptions. I find it helpful to alternate depending on the command. I usually have Deepspeech for default and Google as needed.
+   ```
+   alexa login
+   ```
 
-See below for more information
+   This runs a loopback OAuth flow (Login with Amazon) and caches the
+   resulting tokens.
 
-### Initialize Tokens
-You will be prompted if you want to initialize tokens, say "y".
+4. **Verify everything works:**
 
-The CLI will start a Flask server & then launch a browser for you to authenticate with the Amazon credentials that will connect Alexa Voice Service.
+   ```
+   alexa doctor
+   ```
 
-You can redo this process at any point via 
-```
-alexa --tokens
-```
+   Validates your credentials and runs one live round-trip.
 
-NOTE: you can also specify token keys to register more than one account. See examples below for more info.
-
-## Try it out!
-```
-alexa -v "what time is it"
-main: Verbose mode enabled
-main: Copying artifacts to None
-get_access_token: using key 'blablah'
-...
-transcribe_save: saving hash '0f531119ee4877767756792dad271410' with 32 characters
-{'success': True, 'result': 'the time is eleven seventeen p m'}
-```
-
-# Transcription Instructions
-
-## Google Cloud Transcriptions
-Go through the [gcloud setup](https://cloud.google.com/sdk/) & put the credentials file that gets generated here: `~/.gcloud/gcloud-alexa-cli.json`.  Once that is done, you should be able to run something like:
+## Usage
 
 ```
-export GOOGLE_APPLICATION_CREDENTIALS=~/.gcloud/gcloud-alexa-cli.json
-export GOOGLE_ACCESS_TOKEN=`gcloud auth application-default print-access-token`
-echo $GOOGLE_ACCESS_TOKEN
+alexa "what time is it"
 ```
 
-## Mozilla DeepSpeech
-If you'd like to use Mozilla's DeepSpeech, following the instructions at [github.com/mozilla/deepspeech](https://github.com/mozilla/deepspeech).
+Flags (all global):
 
-Be sure to also download the [pretrained models](https://github.com/mozilla/DeepSpeech/releases) & make a note of the path as that will be used during Configuration.
+- `--voice <piper|espeak>` — TTS backend (default `piper`).
+- `--model <base.en|tiny.en>` — Whisper model (default `base.en`).
+- `--region <na|eu|fe>` — AVS gateway region (default `na`).
+- `--json` — print the full result as JSON.
+- `--keep-artifacts` — keep intermediate audio artifacts.
+- `-o, --output <DIR>` — write artifacts to `DIR` (implies
+  `--keep-artifacts`).
+- `--no-cache` — skip the transcription cache.
+- `-v, --verbose` — verbose diagnostics.
 
-I would encourage you to install `deepspeech-gpu` for faster results.
+Subcommands:
 
-# Docker 
-I'm not done with a containerized version of the Alexa CLI for Docker. My end plan is to have the tool equally distributable (without personalized keys) as a single container, but not quite there yet. You can build the container like so:
-```
-make container
-```
+- `alexa configure` — set Client ID / Secret / Product ID.
+- `alexa login` — authorize with Amazon and cache tokens.
+- `alexa doctor` — validate credentials and run one live round-trip.
 
-If you want to jump into a shell with everything loaded, try:
-```
-make debug
-```
+Transcriptions are cached in `~/.alexa/` so repeated identical Alexa
+responses are not re-transcribed.
 
-# More Examples
+## License
 
-### Helpful calculations
-```
-$ alexa "how many minutes is three thousand six hundred seconds"
-3600 seconds is 60 minutes
-
-$ alexa "how many days is 1,515 hours"
-1515 hours is 63.13 days
-
-```
-
-### How to reconfigure or update a value
-```
-$ alexa --configure # Setup AVS Client ID, Secret, and Program Name
-
-$ alexa --tokens # Setup your Amazon account credentials
-
-```
-
-### If you use different Amazon accounts, you can save tokens and use different keys as needed (e.g. work or personal accounts)
-```
-$ alexa --tokens --token_key="personal" # Setup your Amazon account credentials for a specific key
-
-$ alexa --list_tokens # List all available tokens
-
-$ alexa --token_key="personal" "play all along the watch tower on office"
-all along the watch tower by the jimmy hendrix experience playing on home office
-
-$ alexa --token_key="work" "turn off desk light"
-ok
-```
-
-### Keep all output and artifacts in a folder 
-```
-$ alexa --verbose --artifacts --output="./artifacts/request" "what time is it"
-
-```
-
-# Words of Warning
-This project is very much a giant hack. But I find this interface useful and am happy to share with others.
-
-# Issues
-Please submit issues here on GitHub and I'll do my best to address
+MIT. See [LICENSE](LICENSE).
