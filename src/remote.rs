@@ -986,7 +986,7 @@ pub async fn announce(
                 );
             } else if !d.online {
                 eprintln!(
-                    "note: \"{}\" reports offline. Echo devices won't play until they reconnect; for Sonos / third-party this flag is unreliable, so it may still play.",
+                    "note: \"{}\" reports offline — Amazon won't render a lone announcement to an offline device. Reach it with `alexa announce --all` (it rides along with your online speakers), or target it directly once it's back online.",
                     d.account_name
                 );
             }
