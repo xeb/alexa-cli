@@ -1,5 +1,5 @@
 use crate::config::{Config, Region, Voice};
-use crate::{auth, avs, cache, tts};
+use crate::{auth, avs, cache, remote, tts};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{self, Read};
@@ -58,6 +58,39 @@ pub enum Command {
     Login,
     /// Validate credentials and run one live round-trip
     Doctor,
+    /// List your Echo devices (unofficial Alexa Remote API)
+    Devices,
+    /// Push an announcement to your Echo devices
+    Announce {
+        /// Message to announce
+        message: String,
+        /// Target a single device by (substring of) its name
+        #[arg(long)]
+        device: Option<String>,
+        /// Announce to every online device
+        #[arg(long)]
+        all: bool,
+        /// Announcement title (default "Announcement")
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Speak (TTS) a message on a single device
+    Say {
+        /// Message to speak
+        message: String,
+        /// Target device by (substring of) its name
+        #[arg(long)]
+        device: String,
+    },
+    /// Store Alexa Remote auth (refresh token and/or cookie string)
+    AnnounceAuth {
+        /// LWA refresh token (Atzr|...)
+        #[arg(long)]
+        refresh_token: Option<String>,
+        /// Pre-baked website Cookie header string
+        #[arg(long)]
+        cookie: Option<String>,
+    },
 }
 
 fn apply_overrides(cli: &Cli, cfg: &mut Config) {
@@ -86,6 +119,59 @@ pub async fn run() -> Result<()> {
             return auth::login(&cfg, 8086).await;
         }
         Some(Command::Doctor) => return doctor(&cli).await,
+        Some(Command::Devices) => {
+            let mut cfg = Config::load_or_default();
+            apply_overrides(&cli, &mut cfg);
+            let devices = remote::list_devices(&cfg, cli.verbose).await?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&devices)?);
+            } else if devices.is_empty() {
+                println!("No devices found.");
+            } else {
+                for d in &devices {
+                    println!(
+                        "{}  [{}]  {}",
+                        d.account_name,
+                        if d.online { "online" } else { "offline" },
+                        d.serial_number
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Some(Command::Announce {
+            message,
+            device,
+            all,
+            title,
+        }) => {
+            let mut cfg = Config::load_or_default();
+            apply_overrides(&cli, &mut cfg);
+            // Default to all devices when no specific device is requested.
+            let use_all = *all || device.is_none();
+            let title = title.clone().unwrap_or_else(|| "Announcement".to_string());
+            remote::announce(&cfg, message, &title, device.as_deref(), use_all, cli.verbose).await?;
+            println!("Announcement sent.");
+            return Ok(());
+        }
+        Some(Command::Say { message, device }) => {
+            let mut cfg = Config::load_or_default();
+            apply_overrides(&cli, &mut cfg);
+            remote::say(&cfg, message, device, cli.verbose).await?;
+            println!("Sent.");
+            return Ok(());
+        }
+        Some(Command::AnnounceAuth {
+            refresh_token,
+            cookie,
+        }) => {
+            remote::set_auth(refresh_token.clone(), cookie.clone())?;
+            println!(
+                "Saved Alexa Remote auth to {}",
+                remote::RemoteState::path().display()
+            );
+            return Ok(());
+        }
         None => {}
     }
 

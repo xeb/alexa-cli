@@ -4,5 +4,6 @@ pub mod avs;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod remote;
 pub mod stt;
 pub mod tts;
