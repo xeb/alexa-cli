@@ -82,6 +82,15 @@ pub enum Command {
         #[arg(long)]
         device: String,
     },
+    /// Show recent Alexa voice-history transcripts (text only)
+    History {
+        /// Max number of entries to show
+        #[arg(long, default_value_t = 20)]
+        size: usize,
+        /// Filter to a device by (substring of) its name
+        #[arg(long)]
+        device: Option<String>,
+    },
     /// Browser-based login to enable announcements (mints a durable refresh token)
     AnnounceLogin,
     /// Store Alexa Remote auth (refresh token and/or cookie string)
@@ -162,6 +171,11 @@ pub async fn run() -> Result<()> {
             remote::say(&cfg, message, device, cli.verbose).await?;
             println!("Sent.");
             return Ok(());
+        }
+        Some(Command::History { size, device }) => {
+            let mut cfg = Config::load_or_default();
+            apply_overrides(&cli, &mut cfg);
+            return remote::history(&cfg, *size, device.as_deref(), cli.verbose).await;
         }
         Some(Command::AnnounceLogin) => {
             let mut cfg = Config::load_or_default();

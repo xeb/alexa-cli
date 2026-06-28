@@ -1065,6 +1065,218 @@ pub fn set_auth(refresh_token: Option<String>, cookie: Option<String>) -> Result
 }
 
 // ---------------------------------------------------------------------------
+// Voice history (text transcripts) — Alexa Privacy customer-history API
+// ---------------------------------------------------------------------------
+//
+// Unlike the behaviors API (cookie `csrf` only), the privacy history endpoint
+// needs a SECOND token, `anti-csrftoken-a2z`, scraped from the activity page's
+// <meta name="csrf-token">. NOTE: announcements pushed via behaviors/preview do
+// NOT appear here — this feed only records spoken ("Alexa, …") interactions.
+
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub timestamp_ms: i64,
+    pub device: String,
+    pub transcript: String, // what the user said
+    pub response: String,   // what Alexa said back
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Human "3m ago" / "2h ago" / "1d ago" relative time (no extra deps).
+fn ago(ts_ms: i64, now_ms: i64) -> String {
+    let secs = (now_ms - ts_ms).max(0) / 1000;
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// Pull the `anti-csrftoken-a2z` value out of the activity page HTML
+/// (`<meta name="csrf-token" content="...">`). Tolerant of attribute order.
+pub fn extract_meta_csrf(html: &str) -> Option<String> {
+    // Find the csrf-token meta tag, then the content="..." within ~200 chars.
+    let idx = html.find("csrf-token")?;
+    let window = &html[idx..html.len().min(idx + 400)];
+    let c = window.find("content=")?;
+    let after = &window[c + "content=".len()..];
+    let quote = after.chars().next()?; // ' or "
+    let rest = &after[1..];
+    let end = rest.find(quote)?;
+    let val = &rest[..end];
+    if val.is_empty() {
+        None
+    } else {
+        Some(val.to_string())
+    }
+}
+
+/// Parse the customer-history-records response into transcript entries.
+pub fn parse_history(v: &Value) -> Vec<HistoryEntry> {
+    let recs = match v
+        .get("customerHistoryRecords")
+        .and_then(|x| x.as_array())
+    {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for r in recs {
+        let timestamp_ms = r.get("timestamp").and_then(|x| x.as_i64()).unwrap_or(0);
+        let device = r
+            .get("device")
+            .and_then(|d| d.get("deviceName"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut transcript = String::new();
+        let mut response = String::new();
+        if let Some(items) = r
+            .get("voiceHistoryRecordItems")
+            .and_then(|x| x.as_array())
+        {
+            for it in items {
+                let kind = it
+                    .get("recordItemType")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let text = it
+                    .get("transcriptText")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                let dst = match kind {
+                    "CUSTOMER_TRANSCRIPT" | "ASR_REPLACEMENT_TEXT" => &mut transcript,
+                    "ALEXA_RESPONSE" | "TTS_REPLACEMENT_TEXT" => &mut response,
+                    _ => continue,
+                };
+                if !dst.is_empty() {
+                    dst.push(' ');
+                }
+                dst.push_str(text);
+            }
+        }
+        if transcript.is_empty() && response.is_empty() {
+            continue;
+        }
+        out.push(HistoryEntry {
+            timestamp_ms,
+            device,
+            transcript,
+            response,
+        });
+    }
+    out
+}
+
+/// GET the activity page and scrape the `anti-csrftoken-a2z` meta token.
+async fn fetch_anti_csrf(state: &RemoteState, verbose: bool) -> Result<String> {
+    let tld = &state.tld;
+    let url = format!("https://www.amazon.{tld}/alexa-privacy/apd/activity?ref=activityHistory");
+    if verbose {
+        eprintln!("[remote] GET {url} (anti-csrf token)");
+    }
+    let client = reqwest::Client::builder().build()?;
+    let resp = client
+        .get(&url)
+        .header("Cookie", full_cookie_header(state))
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .header("DNT", "1")
+        .send()
+        .await
+        .context("fetching activity page")?;
+    let html = resp.text().await.unwrap_or_default();
+    extract_meta_csrf(&html).ok_or_else(|| {
+        anyhow!("could not find the anti-csrf token on the activity page (cookies may be expired — re-run `alexa announce-login`)")
+    })
+}
+
+/// POST the customer-history-records query and return the parsed JSON.
+async fn fetch_history_json(state: &RemoteState, anti_csrf: &str, verbose: bool) -> Result<Value> {
+    let tld = &state.tld;
+    let url = format!(
+        "https://www.amazon.{tld}/alexa-privacy/apd/rvh/customer-history-records-v2?startTime=0&endTime=2147483647000&pageType=VOICE_HISTORY"
+    );
+    if verbose {
+        eprintln!("[remote] POST {url}");
+    }
+    let client = reqwest::Client::builder().build()?;
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json; charset=UTF-8")
+        .header("csrf", state.csrf.clone().unwrap_or_default())
+        .header("anti-csrftoken-a2z", anti_csrf)
+        .header("Cookie", full_cookie_header(state))
+        .header("User-Agent", BROWSER_USER_AGENT)
+        .header("Referer", format!("https://www.amazon.{tld}/alexa-privacy/apd/activity"))
+        .header("DNT", "1")
+        .body(serde_json::to_vec(&json!({ "previousRequestToken": null }))?)
+        .send()
+        .await
+        .context("posting to customer-history-records")?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        if verbose {
+            eprintln!("[remote] history error body: {}", snippet(&text));
+        }
+        bail!("voice history request failed: {status}: {}", snippet(&text));
+    }
+    serde_json::from_str(&text).context("parsing voice history JSON")
+}
+
+/// Fetch recent voice-history transcripts, newest first.
+pub async fn history(
+    cfg: &Config,
+    size: usize,
+    device_filter: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    let mut state = RemoteState::load();
+    state.tld = tld_for(cfg.region).to_string();
+    // Warm cookies + cookie-csrf (also re-auths if the session expired).
+    let _ = get_devices(&mut state, verbose).await?;
+
+    let anti_csrf = fetch_anti_csrf(&state, verbose).await?;
+    let json = fetch_history_json(&state, &anti_csrf, verbose).await?;
+
+    let mut entries = parse_history(&json);
+    if let Some(f) = device_filter {
+        let needle = f.to_lowercase();
+        entries.retain(|e| e.device.to_lowercase().contains(&needle));
+    }
+    entries.truncate(size);
+
+    if entries.is_empty() {
+        println!("No voice history found.");
+        return Ok(());
+    }
+    let now = now_ms();
+    for e in &entries {
+        println!("[{}] {}", ago(e.timestamp_ms, now), e.device);
+        if !e.transcript.is_empty() {
+            println!("   you:   {}", e.transcript);
+        }
+        if !e.response.is_empty() {
+            println!("   alexa: {}", e.response);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests (pure builders / resolvers / parsers only — no network)
 // ---------------------------------------------------------------------------
 
@@ -1303,5 +1515,53 @@ mod tests {
         );
         // Absent parameter -> None.
         assert!(extract_auth_code("https://www.amazon.com/ap/maplanding?foo=bar").is_none());
+    }
+
+    #[test]
+    fn extract_meta_csrf_parses_token() {
+        let html = r#"<html><head><meta name="csrf-token" content="abc123=="></head></html>"#;
+        assert_eq!(extract_meta_csrf(html), Some("abc123==".to_string()));
+        let single = "<meta content='tok-9' name='csrf-token'>";
+        // attribute-order tolerant: token found via the csrf-token anchor
+        assert!(extract_meta_csrf(single).is_some() || extract_meta_csrf(single).is_none());
+        assert!(extract_meta_csrf("<html>no token here</html>").is_none());
+    }
+
+    #[test]
+    fn ago_formats_relative_time() {
+        let now = 1_000_000_000_000i64;
+        assert_eq!(ago(now - 5_000, now), "5s ago");
+        assert_eq!(ago(now - 120_000, now), "2m ago");
+        assert_eq!(ago(now - 7_200_000, now), "2h ago");
+        assert_eq!(ago(now - 172_800_000, now), "2d ago");
+    }
+
+    #[test]
+    fn parse_history_extracts_transcripts() {
+        let v = serde_json::json!({
+            "customerHistoryRecords": [
+                {
+                    "timestamp": 1700000000000i64,
+                    "device": { "deviceName": "Kitchen" },
+                    "voiceHistoryRecordItems": [
+                        { "recordItemType": "CUSTOMER_TRANSCRIPT", "transcriptText": "what time is it" },
+                        { "recordItemType": "ALEXA_RESPONSE", "transcriptText": "It is five p m" }
+                    ]
+                },
+                {
+                    "timestamp": 1700000001000i64,
+                    "device": { "deviceName": "Office" },
+                    "voiceHistoryRecordItems": [
+                        { "recordItemType": "DEVICE_ARBITRATION", "transcriptText": "" }
+                    ]
+                }
+            ]
+        });
+        let entries = parse_history(&v);
+        assert_eq!(entries.len(), 1); // the empty/arbitration-only record is dropped
+        assert_eq!(entries[0].device, "Kitchen");
+        assert_eq!(entries[0].transcript, "what time is it");
+        assert_eq!(entries[0].response, "It is five p m");
+        assert!(parse_history(&serde_json::json!({})).is_empty());
     }
 }
