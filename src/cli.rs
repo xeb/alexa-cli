@@ -175,7 +175,7 @@ pub async fn run() -> Result<()> {
         Some(Command::History { size, device }) => {
             let mut cfg = Config::load_or_default();
             apply_overrides(&cli, &mut cfg);
-            return remote::history(&cfg, *size, device.as_deref(), cli.verbose).await;
+            return remote::history(&cfg, *size, device.as_deref(), cli.json, cli.verbose).await;
         }
         Some(Command::AnnounceLogin) => {
             let mut cfg = Config::load_or_default();

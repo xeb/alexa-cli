@@ -1112,7 +1112,7 @@ pub fn set_auth(refresh_token: Option<String>, cookie: Option<String>) -> Result
 // <meta name="csrf-token">. NOTE: announcements pushed via behaviors/preview do
 // NOT appear here — this feed only records spoken ("Alexa, …") interactions.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct HistoryEntry {
     pub timestamp_ms: i64,
     pub device: String,
@@ -1316,6 +1316,7 @@ pub async fn history(
     cfg: &Config,
     size: usize,
     device_filter: Option<&str>,
+    as_json: bool,
     verbose: bool,
 ) -> Result<()> {
     let mut state = RemoteState::load();
@@ -1332,6 +1333,13 @@ pub async fn history(
         entries.retain(|e| e.device.to_lowercase().contains(&needle));
     }
     entries.truncate(size);
+
+    if as_json {
+        // Machine-readable: array of {timestamp_ms, device, transcript, response}.
+        // Empty history prints `[]` so consumers always get valid JSON.
+        println!("{}", serde_json::to_string(&entries)?);
+        return Ok(());
+    }
 
     if entries.is_empty() {
         println!("No voice history found.");
