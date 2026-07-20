@@ -713,7 +713,10 @@ async fn register(
             "domain": "Device",
             "app_version": REG_APP_VERSION,
             "device_type": REG_DEVICE_TYPE,
-            "device_name": "alexa-cli",
+            // Unique per registration: Amazon's duplicate-name check appears to
+            // include deregistered device records, so a fixed name can only ever
+            // register once per account. Suffix with the (random) serial prefix.
+            "device_name": format!("alexa-cli-{}", serial.chars().take(8).collect::<String>().to_lowercase()),
             "os_version": "18.3.1",
             "device_serial": serial,
             "device_model": "iPhone",
