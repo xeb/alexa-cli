@@ -1468,6 +1468,22 @@ mod tests {
         assert!(serials.contains(&"SN2"));
     }
 
+    /// A long, punctuation-heavy sentence (commas, an em dash, parens, a
+    /// degree sign) must reach `speak.value` intact — nothing is truncated at
+    /// the first comma or clause boundary.
+    #[test]
+    fn announcement_keeps_full_punctuated_text() {
+        let targets = vec![dev("Kitchen", "SN1", "TYPE1", "CUST", true)];
+        let text = "Eddie ran 1h 59m on the wheel last night (Thu Aug 20) \u{2014} 4.4 miles, \
+                    about 64 football fields, across 25 runs with a longest of 15m 36s. \
+                    A bit under his usual 2h 45m. He's at 19.5 miles since the camera \
+                    went up, and it was 78\u{b0}F in there.";
+        let s = build_announcement_sequence_json(text, "Announcement", &targets);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["startNode"]["operationPayload"]["content"][0]["speak"]["value"], text);
+        assert_eq!(v["startNode"]["operationPayload"]["content"][0]["display"]["body"], text);
+    }
+
     #[test]
     fn speak_sequence_shape() {
         let d = dev("Office", "SNX", "TYPEX", "CUSTX", true);
