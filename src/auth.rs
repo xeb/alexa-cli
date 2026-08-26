@@ -188,6 +188,86 @@ pub async fn login(config: &Config, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Extract the `code` value from a pasted OAuth redirect URL (the address-bar URL
+/// after authorizing, e.g. `http://localhost:8086/auth?code=XXX&scope=...`).
+fn extract_code(pasted_url: &str) -> Option<String> {
+    let query = pasted_url
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or(pasted_url);
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        if k == "code" && !v.is_empty() {
+            return Some(percent_decode(v));
+        }
+    }
+    None
+}
+
+/// Paste-relay variant of `login` for headless/remote use (SSH, tmux, authd).
+/// Unlike `login`, this does NOT run a loopback server — it prints the authorize
+/// URL, then reads the pasted redirect URL from stdin, so it works when there is
+/// no local browser and no way to reach a localhost callback. Writes tokens.json.
+pub async fn login_relay(config: &Config) -> Result<()> {
+    use std::io::Write;
+    // Same redirect the interactive `login` registers; the browser will fail to
+    // load it (nothing is listening), which is expected — the address bar still
+    // shows the `code`.
+    let redirect_uri = "http://localhost:8086/auth".to_string();
+    let url = authorize_url(config, &redirect_uri);
+    println!(
+        "Open this URL in your browser and sign in / authorize:\n\n{url}\n\n\
+         After you approve, the browser will try to load a localhost page that FAILS\n\
+         to open — that is expected. Copy the FULL address-bar URL (it contains\n\
+         'code=') and paste it here.\n"
+    );
+    print!("Paste the full URL here: ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("reading pasted URL from stdin")?;
+    let pasted = line.trim();
+
+    let code = extract_code(pasted).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no authorization code found in the pasted URL — copy the FULL \
+             address-bar URL (it must contain 'code=')"
+        )
+    })?;
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code.as_str()),
+        ("client_id", config.client_id.as_str()),
+        ("client_secret", config.client_secret.as_str()),
+        ("redirect_uri", redirect_uri.as_str()),
+    ];
+    let tokens = exchange(config, &params).await?;
+    tokens.save()?;
+    println!(
+        "Login successful — AVS command tokens saved to {}",
+        Tokens::path().display()
+    );
+    Ok(())
+}
+
+/// Probe the AVS command token by forcing a refresh. Exits Ok if the refresh
+/// grant still works; errors with a stable "refresh token may be invalid"
+/// marker (which authd classifies as an auth failure) if it is revoked/expired.
+/// Never prints token values.
+pub async fn token_check(config: &Config) -> Result<()> {
+    match access_token(config, true).await {
+        Ok(_) => {
+            println!("avs command token ok");
+            Ok(())
+        }
+        Err(e) => {
+            anyhow::bail!("avs refresh token may be invalid: {e}");
+        }
+    }
+}
+
 pub async fn access_token(config: &Config, force_refresh: bool) -> Result<String> {
     let tokens = Tokens::load()?;
     if !force_refresh && !is_expired(tokens.obtained_at, now_secs()) {

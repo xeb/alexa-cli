@@ -56,6 +56,10 @@ pub enum Command {
     Configure,
     /// Authorize with Amazon and cache tokens
     Login,
+    /// Authorize the AVS command token via paste-relay (headless/remote; no loopback)
+    LoginRelay,
+    /// Probe the AVS command token (refresh it); nonzero exit if revoked/expired
+    TokenCheck,
     /// Validate credentials and run one live round-trip
     Doctor,
     /// List your Echo devices (unofficial Alexa Remote API)
@@ -128,6 +132,14 @@ pub async fn run() -> Result<()> {
         Some(Command::Login) => {
             let cfg = Config::load()?;
             return auth::login(&cfg, 8086).await;
+        }
+        Some(Command::LoginRelay) => {
+            let cfg = Config::load()?;
+            return auth::login_relay(&cfg).await;
+        }
+        Some(Command::TokenCheck) => {
+            let cfg = Config::load()?;
+            return auth::token_check(&cfg).await;
         }
         Some(Command::Doctor) => return doctor(&cli).await,
         Some(Command::Devices) => {
