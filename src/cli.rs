@@ -243,7 +243,14 @@ pub async fn run() -> Result<()> {
 }
 
 /// The core pipeline: text -> TTS -> AVS -> STT -> text.
-async fn ask(cli: &Cli, text: &str) -> Result<String> {
+///
+/// `pub` (as of the `house` integration) so a library caller can drive the
+/// exact same round trip `alexa <text>`/`alexa doctor` use, by constructing
+/// a `Cli` value directly — every field on `Cli` is already public. This
+/// changes no behavior of the `alexa` binary itself; it only makes an
+/// existing free function reachable from outside the crate. Naturally still
+/// behind this crate's `speech` feature, since `cli` (this whole module) is.
+pub async fn ask(cli: &Cli, text: &str) -> Result<String> {
     let mut cfg = Config::load()?;
     apply_overrides(cli, &mut cfg);
     let v = cli.verbose;
