@@ -277,15 +277,26 @@ pub fn build_speak_sequence_json(text: &str, device: &Device) -> String {
 // JSON / cookie helpers
 // ---------------------------------------------------------------------------
 
-/// Truncate a body to a short, UTF-8-safe snippet for error/diagnostic output.
-fn snippet(s: &str) -> String {
-    let trimmed = s.trim();
-    let short: String = trimmed.chars().take(400).collect();
-    if short.len() < trimmed.len() {
-        format!("{short}…")
-    } else {
-        short
-    }
+/// A response body from Amazon's API, described without ever printing a
+/// byte of it -- not truncated-but-shown, genuinely redacted. Replaces the
+/// old `snippet()`, which truncated to 400 chars but still printed the
+/// content. Two of the endpoints this module talks to
+/// (`exchangetoken/cookies`, `auth/register`) return session cookies or a
+/// durable refresh token as their entire successful response body; their
+/// *unsuccessful*-but-still-200-shaped responses (unexpected JSON, a missing
+/// field) are exactly the shape that used to carry that same body straight
+/// into an `anyhow!` error message with **no `-v` gate at all** -- a
+/// non-verbose `house say`/`house speakers` failure could have printed it.
+/// The other endpoints this module talks to (`behaviors/preview`,
+/// `customer-history-records`) are not credential-issuing, but this is
+/// applied uniformly rather than endpoint-by-endpoint: a blanket "never
+/// print a body" policy is the one that survives the next endpoint added
+/// here without anyone having to re-derive which ones were "safe" first.
+/// Reports enough to debug with -- length, and whether it parsed as JSON --
+/// and nothing else.
+fn redacted(text: &str) -> String {
+    let kind = if serde_json::from_str::<Value>(text).is_ok() { "json" } else { "non-json" };
+    format!("<{} bytes, {kind}, redacted>", text.trim().len())
 }
 
 /// Walk arbitrary JSON, collecting any objects (inside arrays) that carry both
@@ -410,19 +421,19 @@ async fn exchange_token_for_cookies(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if verbose {
-        eprintln!("[remote] exchangetoken status={status} body={}", snippet(&text));
+        eprintln!("[remote] exchangetoken status={status} body={}", redacted(&text));
     }
     let parsed: Value = serde_json::from_str(&text).map_err(|e| {
         anyhow!(
             "cookie exchange returned non-JSON (status {status}): {} ({e})",
-            snippet(&text)
+            redacted(&text)
         )
     })?;
     extract_cookies(&parsed).ok_or_else(|| {
         anyhow!(
             "could not find website cookies in exchange response (status {status}); \
              the refresh token may be invalid or expired: {}",
-            snippet(&text)
+            redacted(&text)
         )
     })
 }
@@ -752,12 +763,12 @@ async fn register(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if verbose {
-        eprintln!("[remote] register status={status} body={}", snippet(&text));
+        eprintln!("[remote] register status={status} body={}", redacted(&text));
     }
     let parsed: Value = serde_json::from_str(&text).map_err(|e| {
         anyhow!(
             "device registration returned non-JSON (status {status}): {} ({e})",
-            snippet(&text)
+            redacted(&text)
         )
     })?;
     let tokens = parsed
@@ -772,7 +783,7 @@ async fn register(
             anyhow!(
                 "device registration did not return a refresh token (status {status}); \
                  the authorization code may be stale or the pasted URL incomplete: {}",
-                snippet(&text)
+                redacted(&text)
             )
         })?
         .to_string();
@@ -929,12 +940,12 @@ async fn post_behavior(state: &mut RemoteState, sequence_json: &str, verbose: bo
         }
         let body = resp.text().await.unwrap_or_default();
         if verbose {
-            eprintln!("[remote] behaviors error body: {}", snippet(&body));
+            eprintln!("[remote] behaviors error body: {}", redacted(&body));
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
-            bail!("RATE_LIMITED: still throttled after retries: {}", snippet(&body));
+            bail!("RATE_LIMITED: still throttled after retries: {}", redacted(&body));
         }
-        bail!("behaviors/preview failed: {status}: {}", snippet(&body));
+        bail!("behaviors/preview failed: {status}: {}", redacted(&body));
     }
 }
 
@@ -1321,9 +1332,9 @@ async fn fetch_history_json(state: &RemoteState, anti_csrf: &str, verbose: bool)
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         if verbose {
-            eprintln!("[remote] history error body: {}", snippet(&text));
+            eprintln!("[remote] history error body: {}", redacted(&text));
         }
-        bail!("voice history request failed: {status}: {}", snippet(&text));
+        bail!("voice history request failed: {status}: {}", redacted(&text));
     }
     serde_json::from_str(&text).context("parsing voice history JSON")
 }
@@ -1382,6 +1393,31 @@ pub async fn history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- redacted(): the fix for the cookie/token leak review found --
+
+    #[test]
+    fn redacted_never_contains_the_original_body() {
+        let body = r#"{"Response":{"Success":{"Tokens":{"Cookies":{"CookiesList":[{"Name":"session-token","Value":"super-secret-session-cookie-value"}]}}}}}"#;
+        let out = redacted(body);
+        assert!(!out.contains("super-secret-session-cookie-value"), "{out}");
+        assert!(!out.contains("session-token"), "{out}");
+    }
+
+    #[test]
+    fn redacted_reports_length_and_json_shape_without_the_content() {
+        let out = redacted(r#"{"a":1}"#);
+        assert!(out.contains("json"), "{out}");
+        assert!(out.contains("7"), "{out}"); // the body's own byte length
+        assert!(!out.contains('{') && !out.contains('}'), "must not echo any JSON syntax either: {out}");
+    }
+
+    #[test]
+    fn redacted_flags_non_json_bodies_too_without_printing_them() {
+        let out = redacted("Atzr|IwEBI-some-plausible-looking-refresh-token-shaped-text");
+        assert!(out.contains("non-json"), "{out}");
+        assert!(!out.contains("Atzr"), "{out}");
+    }
 
     fn dev(name: &str, serial: &str, dtype: &str, cust: &str, online: bool) -> Device {
         dev_fam(name, serial, dtype, cust, online, "ECHO")

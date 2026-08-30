@@ -143,10 +143,8 @@ pub async fn login(config: &Config, port: u16) -> Result<()> {
             match k {
                 "code" => found_code = Some(percent_decode(val)),
                 "error_description" => error = Some(percent_decode(val)),
-                "error" => {
-                    if error.is_none() {
-                        error = Some(percent_decode(val));
-                    }
+                "error" if error.is_none() => {
+                    error = Some(percent_decode(val));
                 }
                 _ => {}
             }

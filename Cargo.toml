@@ -51,8 +51,22 @@ webbrowser = "1"
 h2 = "0.4"
 http = "1"
 bytes = "1"
-rustls = "0.23"
-tokio-rustls = "0.26"
+# `default-features = false` + explicit `ring`: this crate's own `reqwest`
+# (`rustls-tls`, via hyper-rustls) already wants rustls's `ring` provider, and
+# `avs::tls_connector` used to explicitly install `aws-lc-rs` -- meaning this
+# crate compiled *two* crypto providers into every build of it, harmless only
+# because `avs.rs` always won the install race first. The actual outage this
+# caused: the first consumer whose own TLS stack tried to install a provider
+# before `avs.rs` got the chance (`house`'s Ring alarm websocket) hit both
+# providers already unified into the feature set with neither installed yet,
+# and rustls refuses to guess -- it panics. Naming `ring` here, matching
+# `avs.rs`'s own install, removes the second provider from this crate's own
+# tree entirely, for this crate's own binary and for every consumer of it.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# Same fix as `rustls` above and for the same reason: this crate's own
+# default features include `aws_lc_rs`, which a bare `"0.26"` line would
+# have pulled in regardless of the `rustls` entry's own pinning.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "0.26"
 whisper-rs = { version = "0.16", optional = true }
 sherpa-onnx = { version = "1", optional = true }

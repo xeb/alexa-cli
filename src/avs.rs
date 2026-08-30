@@ -7,8 +7,22 @@ use uuid::Uuid;
 
 fn tls_connector() -> TlsConnector {
     // rustls 0.23 requires a process-default crypto provider before ClientConfig::builder().
-    // Idempotent: returns Err if already installed, which we ignore.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    // Idempotent: returns Err if already installed, which we ignore -- and a caller that
+    // already installed one (e.g. `house`'s own `tls::install()`, which runs before this
+    // could ever be reached) simply wins the race; this only matters for the standalone
+    // `alexa` binary, where this is the sole install site.
+    //
+    // `ring`, not `aws-lc-rs`: this crate's own `reqwest` dependency (`rustls-tls`, used by
+    // every function in `remote.rs`) already pulls rustls's `ring` feature in via
+    // hyper-rustls, so choosing `aws-lc-rs` here used to mean *two* crypto providers compiled
+    // into the same `rustls` build -- harmless as long as this function always won the
+    // install race first, but a real outage waiting to happen for the first consumer whose
+    // own TLS stack (`house`'s Ring alarm websocket, as it turned out) tried to install `ring`
+    // and found `aws-lc-rs` already unified into the feature set instead, or vice versa,
+    // before either side had installed anything: rustls refuses to guess and panics. Matching
+    // the provider this crate's own `reqwest` already wants removes the second provider from
+    // the tree entirely, for this crate and every consumer of it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut cfg = rustls::ClientConfig::builder()
