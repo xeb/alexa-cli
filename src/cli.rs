@@ -173,8 +173,19 @@ pub async fn run() -> Result<()> {
             // Default to all devices when no specific device is requested.
             let use_all = *all || device.is_none();
             let title = title.clone().unwrap_or_else(|| "Announcement".to_string());
-            remote::announce(&cfg, message, &title, device.as_deref(), use_all, cli.verbose).await?;
-            println!("Announcement sent.");
+            // `remote::announce` returns what happened rather than printing
+            // it (so a library caller's `--json` output stays clean); this is
+            // the printing it used to do itself.
+            let outcome =
+                remote::announce(&cfg, message, &title, device.as_deref(), use_all, cli.verbose).await?;
+            println!("Announced on {} device(s).", outcome.sent);
+            if !outcome.skipped.is_empty() {
+                eprintln!(
+                    "Skipped {} device(s) that rejected the announcement: {}",
+                    outcome.skipped.len(),
+                    outcome.skipped.join(", ")
+                );
+            }
             return Ok(());
         }
         Some(Command::Say { message, device }) => {

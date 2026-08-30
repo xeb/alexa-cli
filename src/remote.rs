@@ -949,7 +949,29 @@ pub async fn list_devices(cfg: &Config, verbose: bool) -> Result<Vec<Device>> {
     get_devices(&mut state, verbose).await
 }
 
+/// What [`announce`] actually did, so a library caller can report it in its
+/// own voice instead of `announce` printing on the caller's behalf — see the
+/// struct's own doc comment.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AnnounceOutcome {
+    /// How many devices actually got the announcement.
+    pub sent: usize,
+    /// Account names of devices that were targeted but rejected it — Amazon
+    /// returns 200 for the batch even when a member device can't play, so
+    /// this is the only place that failure surfaces.
+    pub skipped: Vec<String>,
+}
+
 /// Send an AlexaAnnouncement to the matching / all online devices.
+///
+/// Returns what happened rather than printing it — `announce` used to
+/// `println!`/`eprintln!` its own summary directly, which is fine for the
+/// `alexa` binary but means a library caller (e.g. `house say`) has no way to
+/// keep its own `--json` output clean: the summary line would land on stdout
+/// ahead of (or instead of) whatever JSON the caller renders. `cli.rs`'s own
+/// `Command::Announce` handler prints the exact same two lines this used to,
+/// from the returned [`AnnounceOutcome`], so the `alexa` binary's observable
+/// behavior is unchanged.
 pub async fn announce(
     cfg: &Config,
     message: &str,
@@ -957,7 +979,7 @@ pub async fn announce(
     name: Option<&str>,
     all: bool,
     verbose: bool,
-) -> Result<()> {
+) -> Result<AnnounceOutcome> {
     let mut state = RemoteState::load();
     state.tld = tld_for(cfg.region).to_string();
     let devices = get_devices(&mut state, verbose).await?;
@@ -1020,15 +1042,7 @@ pub async fn announce(
             failed.len()
         );
     }
-    println!("Announced on {sent} device(s).");
-    if !failed.is_empty() {
-        eprintln!(
-            "Skipped {} device(s) that rejected the announcement: {}",
-            failed.len(),
-            failed.join(", ")
-        );
-    }
-    Ok(())
+    Ok(AnnounceOutcome { sent, skipped: failed })
 }
 
 /// Announce to a set of same-customer devices: try one batch call, and if Amazon

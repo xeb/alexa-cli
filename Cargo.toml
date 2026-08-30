@@ -13,6 +13,24 @@ path = "src/lib.rs"
 name = "alexa"
 path = "src/main.rs"
 
+[features]
+# The round-trip voice pipeline (TTS -> AVS -> Whisper STT): `stt`, `tts` and
+# `audio` (their shared resampling helpers), plus `cli` (the `alexa` binary's
+# command tree, which drives that pipeline for the bare-text and `doctor`
+# forms). On by default so `cargo build`/`cargo test` in this repository — and
+# the `alexa` binary specifically — behave exactly as before this feature was
+# added.
+#
+# Off, a consumer gets exactly `remote` (the unofficial Alexa app API —
+# devices/announce/say/history), `avs` (the raw AVS transport `recognize`
+# uses), `auth`, `cache` and `config` — enough to list devices and push an
+# announcement or a single-device TTS line, without pulling in whisper-rs,
+# sherpa-onnx, symphonia or rubato: two C/C++ speech stacks and a media
+# decoder that a caller which only ever pushes text to a speaker has no use
+# for. See `house`'s `Cargo.toml` for a consumer that does exactly this.
+default = ["speech"]
+speech = ["dep:whisper-rs", "dep:sherpa-onnx", "dep:symphonia", "dep:rubato"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
@@ -24,8 +42,8 @@ uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 blake3 = "1"
 hound = "3.5"
-rubato = "0.15"
-symphonia = { version = "0.5", features = ["mp3"] }
+rubato = { version = "0.15", optional = true }
+symphonia = { version = "0.5", features = ["mp3"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "cookies"] }
 urlencoding = "2"
 tiny_http = "0.12"
@@ -36,8 +54,8 @@ bytes = "1"
 rustls = "0.23"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
-whisper-rs = "0.16"
-sherpa-onnx = "1"
+whisper-rs = { version = "0.16", optional = true }
+sherpa-onnx = { version = "1", optional = true }
 rand = "0.8"
 sha2 = "0.10"
 base64 = "0.22"
